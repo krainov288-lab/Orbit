@@ -142,11 +142,14 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   const [cgHandle, setCgHandle] = useState('');
   const [cgDescription, setCgDescription] = useState('');
 
+  const [isCreatingCG, setIsCreatingCG] = useState(false);
+
   const loadChannelsGroups = async () => {
     try {
       const list = await api.getChannelsGroups();
       if (Array.isArray(list)) {
-        setChannelsGroups(list);
+        const unique = Array.from(new Map(list.map((item) => [item.id, item])).values());
+        setChannelsGroups(unique);
       }
     } catch {}
   };
@@ -433,8 +436,11 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
     description: cg.description,
   }));
 
-  // Filter and sort contacts
-  let displayedContacts = [...contacts, ...cgContacts];
+  // Filter and sort contacts with deduplication
+  const combinedContacts = [...contacts, ...cgContacts];
+  const uniqueContactsMap = new Map<string, Contact>();
+  combinedContacts.forEach((c) => uniqueContactsMap.set(c.id, c));
+  let displayedContacts = Array.from(uniqueContactsMap.values());
 
   if (activeFolderId !== 'all') {
     const activeFolder = folders.find((f) => f.id === activeFolderId);
@@ -910,14 +916,30 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
             </button>
 
             <button
-              onClick={() => {
-                alert('Диалог был скрыт');
+              onClick={async () => {
+                if (contextMenuContact) {
+                  const isCg = contextMenuContact.id.startsWith('cg_');
+                  if (isCg) {
+                    try {
+                      await api.deleteChannelGroup(contextMenuContact.id);
+                      onRefreshContacts();
+                      loadChannelsGroups();
+                    } catch (err: any) {
+                      alert(err.message || 'Ошибка при удалении');
+                    }
+                  } else {
+                    try {
+                      await api.removeContact(contextMenuContact.id);
+                      onRefreshContacts();
+                    } catch {}
+                  }
+                }
                 setContextMenuContact(null);
               }}
               className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-2xl hover:bg-red-50 dark:hover:bg-red-950/30 text-red-600 dark:text-red-400 font-medium transition"
             >
               <Trash2 size={15} />
-              <span>Удалить</span>
+              <span>{contextMenuContact?.id.startsWith('cg_') ? 'Удалить канал / группу' : 'Удалить чат'}</span>
             </button>
           </div>
         </div>
@@ -1035,7 +1057,8 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
             <form
               onSubmit={async (e) => {
                 e.preventDefault();
-                if (!cgTitle.trim()) return;
+                if (!cgTitle.trim() || isCreatingCG) return;
+                setIsCreatingCG(true);
                 try {
                   const created = await api.createChannelGroup({
                     type: cgType,
@@ -1043,13 +1066,19 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
                     handle: cgHandle.trim() || undefined,
                     description: cgDescription.trim() || undefined,
                   });
-                  setChannelsGroups((prev) => [created, ...prev]);
+                  setChannelsGroups((prev) => {
+                    const exists = prev.some((item) => item.id === created.id);
+                    if (exists) return prev;
+                    return [created, ...prev];
+                  });
                   setShowCreateCGModal(false);
                   setCgTitle('');
                   setCgHandle('');
                   setCgDescription('');
                 } catch (err: any) {
                   alert(err.message || 'Ошибка создания');
+                } finally {
+                  setIsCreatingCG(false);
                 }
               }}
               className="space-y-3"

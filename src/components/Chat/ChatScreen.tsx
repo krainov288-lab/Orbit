@@ -30,9 +30,10 @@ import {
   Globe,
   Languages,
 } from 'lucide-react';
-import { Contact, Message, MessageReactionInfo } from '../../types';
+import { Contact, Message, MessageReactionInfo, User } from '../../types';
 import { api } from '../../services/api';
 import { socketService } from '../../services/socket';
+import { cacheService } from '../../services/cacheService';
 import { E2EESecurityModal } from './E2EESecurityModal';
 import { CallOverlayModal, CallType } from './CallOverlayModal';
 import { VoiceRecorder } from './VoiceRecorder';
@@ -49,6 +50,7 @@ interface ChatScreenProps {
   onSendCrypto: () => void;
   isDark?: boolean;
   isGuest?: boolean;
+  user?: User | null;
   onOpenAuth?: () => void;
   onOpenUserProfile?: (userId: string) => void;
 }
@@ -60,6 +62,7 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
   onSendCrypto,
   isDark,
   isGuest,
+  user,
   onOpenAuth,
   onOpenUserProfile,
 }) => {
@@ -73,9 +76,100 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
   const [sendingCrypto, setSendingCrypto] = useState(false);
   const [uploadingMedia, setUploadingMedia] = useState(false);
 
-  // Reaction State
+  // Reaction State & Long-Press Handler
   const [activeReactionPickerId, setActiveReactionPickerId] = useState<string | null>(null);
   const QUICK_EMOJIS = ['❤️', '👍', '🔥', '😂', '😮', '😢', '🙏', '🎉'];
+  const longPressTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  const handleTouchStartMessage = (messageId: string) => {
+    if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+    longPressTimerRef.current = setTimeout(() => {
+      triggerHaptic('impactMedium');
+      setActiveReactionPickerId(messageId);
+    }, 450);
+  };
+
+  const handleTouchEndOrCancelMessage = () => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+  };
+
+  // Channel & Group Permissions & Mute Logic
+  const isChannelGroup = contact.isChannelGroup;
+  const isChannel = isChannelGroup && contact.channelGroupType?.includes('channel');
+  const isGroup = isChannelGroup && contact.channelGroupType?.includes('group');
+
+  const isUserAdminOrAuthor =
+    contact.isAdmin ||
+    (user &&
+      (contact.creatorId === user.id ||
+        (contact.adminIds && contact.adminIds.includes(user.id)) ||
+        (contact.moderatorIds && contact.moderatorIds.includes(user.id))));
+
+  const canPostInChannel = !isChannel || isUserAdminOrAuthor;
+
+  const [isFeedMuted, setIsFeedMuted] = useState(() => {
+    try {
+      const muted: string[] = JSON.parse(localStorage.getItem('orbit_muted_channels') || '[]');
+      return muted.includes(contact.id);
+    } catch {
+      return false;
+    }
+  });
+
+  const handleToggleFeedMute = () => {
+    try {
+      const muted: string[] = JSON.parse(localStorage.getItem('orbit_muted_channels') || '[]');
+      let next: string[];
+      if (muted.includes(contact.id)) {
+        next = muted.filter((id) => id !== contact.id);
+        showToast('Новости канала включены в вашей ленте');
+        setIsFeedMuted(false);
+      } else {
+        next = [...muted, contact.id];
+        showToast('Новости с этого канала не будут попадать в ленту');
+        setIsFeedMuted(true);
+      }
+      localStorage.setItem('orbit_muted_channels', JSON.stringify(next));
+      cacheService.set('muted_channel_ids', next);
+    } catch {}
+  };
+
+  const handleInitiateCall = (type: CallType) => {
+    if (isChannel) {
+      if (type === 'channel_stream') {
+        if (!isUserAdminOrAuthor) {
+          showToast('Только автор или администратор канала может запустить прямой эфир');
+          return;
+        }
+        socketService.emit('start_live_stream', {
+          channelId: contact.id,
+          channelTitle: contact.name,
+          authorName: user?.username || 'Администратор',
+        });
+        setCallType('channel_stream');
+      } else {
+        showToast('В каналах обычные звонки недоступны');
+      }
+      return;
+    }
+
+    if (isGroup && contact.allowCalls === false && !isUserAdminOrAuthor) {
+      showToast('Звонки отключены администратором группы');
+      return;
+    }
+
+    socketService.emit('call_user', {
+      targetUserId: contact.id,
+      callType: type,
+      caller: user,
+      channelId: contact.isChannelGroup ? contact.id : undefined,
+    });
+
+    setCallType(type);
+  };
 
   // Modals & Modes
   const [showE2EEModal, setShowE2EEModal] = useState(false);
@@ -224,10 +318,17 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
     });
 
     const unsubMsg = socketService.subscribe('new_message', (data) => {
-      if (data.senderId === contact.id && data.message) {
+      const isForCurrentChat =
+        String(data.senderId) === String(contact.id) ||
+        (data.message && String(data.message.senderId) === String(contact.id));
+
+      if (isForCurrentChat && data.message) {
         setMessages((prev) => {
           if (prev.some((m) => m.id === data.message.id)) return prev;
           return [...prev, data.message];
+        });
+        requestAnimationFrame(() => {
+          messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
         });
         api.markMessagesRead(contact.id).catch(() => {});
       }
@@ -635,6 +736,14 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
         />
       )}
 
+      {/* Backdrop for message reaction picker outside click auto-close */}
+      {activeReactionPickerId && (
+        <div
+          className="fixed inset-0 z-20 bg-transparent"
+          onClick={() => setActiveReactionPickerId(null)}
+        />
+      )}
+
       {/* Top Header Floating Bar */}
       <div className="px-3 pt-3 pb-1.5 flex items-center gap-2 shrink-0 relative z-30">
         {/* Standalone Circular Back Button */}
@@ -688,21 +797,25 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
           </div>
 
           <div className="flex items-center gap-1 shrink-0">
-            <button
-              onClick={() => setCallType('voice')}
-              className="p-1.5 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 transition"
-              title="Голосовой вызов"
-            >
-              <Phone size={16} />
-            </button>
+            {!isChannel && (
+              <>
+                <button
+                  onClick={() => handleInitiateCall('voice')}
+                  className="p-1.5 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 transition"
+                  title="Голосовой вызов"
+                >
+                  <Phone size={16} />
+                </button>
 
-            <button
-              onClick={() => setCallType('video')}
-              className="p-1.5 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 transition"
-              title="Видеовызов"
-            >
-              <Video size={16} />
-            </button>
+                <button
+                  onClick={() => handleInitiateCall('video')}
+                  className="p-1.5 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-300 transition"
+                  title="Видеовызов"
+                >
+                  <Video size={16} />
+                </button>
+              </>
+            )}
 
             <button
               onClick={() => {
@@ -728,7 +841,7 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
               </button>
 
               {showMenu && (
-                <div className="absolute right-0 top-10 w-52 rounded-2xl bg-white/95 dark:bg-slate-900/95 backdrop-blur-2xl border border-white/60 dark:border-slate-800 shadow-2xl p-1.5 z-50 text-xs animate-fade-in space-y-0.5">
+                <div className="absolute right-0 top-10 w-56 rounded-2xl bg-white/95 dark:bg-slate-900/95 backdrop-blur-2xl border border-white/60 dark:border-slate-800 shadow-2xl p-1.5 z-50 text-xs animate-fade-in space-y-0.5">
                   {onOpenUserProfile && (
                     <button
                       onClick={() => {
@@ -738,7 +851,7 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
                       className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition font-medium"
                     >
                       <Users size={14} className="text-sky-500" />
-                      <span>Посмотреть профиль</span>
+                      <span>{isChannelGroup ? 'О канале / группе' : 'Посмотреть профиль'}</span>
                     </button>
                   )}
 
@@ -753,27 +866,44 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
                     <span>Поиск по сообщениям</span>
                   </button>
 
-                  <button
-                    onClick={() => {
-                      setShowMenu(false);
-                      setCallType('group_conference');
-                    }}
-                    className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition"
-                  >
-                    <Users size={14} className="text-slate-500 dark:text-slate-400" />
-                    <span>Видеоконференция</span>
-                  </button>
+                  {isChannel ? (
+                    <>
+                      {isUserAdminOrAuthor && (
+                        <button
+                          onClick={() => {
+                            setShowMenu(false);
+                            handleInitiateCall('channel_stream');
+                          }}
+                          className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-red-600 dark:text-red-400 hover:bg-red-500/10 transition font-semibold"
+                        >
+                          <Radio size={14} className="animate-pulse" />
+                          <span>Начать прямой эфир</span>
+                        </button>
+                      )}
 
-                  <button
-                    onClick={() => {
-                      setShowMenu(false);
-                      setCallType('channel_stream');
-                    }}
-                    className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition"
-                  >
-                    <Radio size={14} className="text-slate-500 dark:text-slate-400" />
-                    <span>Прямая трансляция</span>
-                  </button>
+                      <button
+                        onClick={() => {
+                          setShowMenu(false);
+                          handleToggleFeedMute();
+                        }}
+                        className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition"
+                      >
+                        <Radio size={14} className={isFeedMuted ? 'text-emerald-500' : 'text-amber-500'} />
+                        <span>{isFeedMuted ? 'Включить новости в ленте' : 'Отключить новости в ленте'}</span>
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      onClick={() => {
+                        setShowMenu(false);
+                        handleInitiateCall(isGroup ? 'group_conference' : 'video');
+                      }}
+                      className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition"
+                    >
+                      <Users size={14} className="text-slate-500 dark:text-slate-400" />
+                      <span>{isGroup ? 'Видеоконференция' : 'Групповой вызов'}</span>
+                    </button>
+                  )}
 
                   <button
                     onClick={() => {
@@ -961,6 +1091,12 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
                 <div className={`relative flex items-end gap-1.5 max-w-[85%] sm:max-w-[75%] ${isMe ? 'flex-row-reverse' : 'flex-row'}`}>
                   {/* Message Bubble Container - Soft Airy Tones */}
                   <div
+                    onTouchStart={() => handleTouchStartMessage(m.id)}
+                    onTouchEnd={handleTouchEndOrCancelMessage}
+                    onTouchMove={handleTouchEndOrCancelMessage}
+                    onMouseDown={() => handleTouchStartMessage(m.id)}
+                    onMouseUp={handleTouchEndOrCancelMessage}
+                    onMouseLeave={handleTouchEndOrCancelMessage}
                     className={`relative group ${
                       m.mediaType === 'sticker' || m.mediaType === 'video_circle'
                         ? 'bg-transparent shadow-none border-0 p-0 text-xs sm:text-sm'
@@ -1367,10 +1503,10 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
       {/* Input Control Area */}
       {!isRecordingVoice && !isRecordingCircle && (
         <>
-          {contact.isChannelGroup && contact.channelGroupType?.includes('channel') && !contact.isAdmin ? (
+          {isChannel && !canPostInChannel ? (
             <div className="px-4 py-3 bg-white/80 dark:bg-slate-900/80 backdrop-blur-xl border-t border-slate-200/50 dark:border-slate-800 flex items-center justify-center gap-2 text-xs font-semibold text-slate-500 dark:text-slate-400 safe-bottom shrink-0">
               <Radio size={16} className="text-sky-500 animate-pulse" />
-              <span>Канал предназначен только для публикаций администраторов</span>
+              <span>В канале могут публиковать записи только автор, администраторы и модераторы</span>
             </div>
           ) : isGuest ? (
             <div className="p-3.5 bg-white/90 dark:bg-slate-900/90 backdrop-blur-xl border-t border-white/60 dark:border-slate-800 flex items-center justify-between gap-3 safe-bottom shrink-0">

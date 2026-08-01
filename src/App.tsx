@@ -1,10 +1,13 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
-import { User, Contact, NewsItem, AppNotification, TabType } from './types';
+import { Phone, PhoneOff, Radio } from 'lucide-react';
+import { User, Contact, NewsItem, AppNotification, TabType, CallType } from './types';
 import { api } from './services/api';
 import { socketService } from './services/socket';
+import { cacheService } from './services/cacheService';
 import { TopBar } from './components/Layout/TopBar';
 import { BottomNav } from './components/Layout/BottomNav';
+import { OfflineOutboxBar } from './components/Layout/OfflineOutboxBar';
 import { NotificationToast } from './components/Layout/NotificationToast';
 import { AuthModal } from './components/Auth/AuthModal';
 import { HomeScreen } from './components/Home/HomeScreen';
@@ -14,6 +17,7 @@ import { WalletScreen } from './components/Wallet/WalletScreen';
 import { FeedScreen } from './components/Feed/FeedScreen';
 import { ProfileScreen } from './components/Profile/ProfileScreen';
 import { UserProfileModal } from './components/Profile/UserProfileModal';
+import { ChannelGroupModal } from './components/Chat/ChannelGroupModal';
 import { PinSetupModal } from './components/Security/PinSetupModal';
 import { PinRecoveryModal } from './components/Security/PinRecoveryModal';
 import { PinLockOverlay } from './components/Security/PinLockOverlay';
@@ -21,9 +25,9 @@ import { PinLockOverlay } from './components/Security/PinLockOverlay';
 export default function App() {
   const [tab, setTab] = useState<TabType>('home');
   const [activeChat, setActiveChat] = useState<Contact | null>(null);
-  const [user, setUser] = useState<User | null>(null);
-  const [contacts, setContacts] = useState<Contact[]>([]);
-  const [news, setNews] = useState<NewsItem[]>([]);
+  const [user, setUser] = useState<User | null>(() => cacheService.getSync<User>('current_user'));
+  const [contacts, setContacts] = useState<Contact[]>(() => cacheService.getCachedContacts() || []);
+  const [news, setNews] = useState<NewsItem[]>(() => cacheService.getCachedNews() || []);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [transactions, setTransactions] = useState<any[]>([]);
   const [isAuthOpen, setIsAuthOpen] = useState(false);
@@ -47,6 +51,12 @@ export default function App() {
     senderInitials?: string;
     senderColor?: string;
     senderId?: string;
+  } | null>(null);
+
+  const [incomingCall, setIncomingCall] = useState<{
+    caller: any;
+    callType: CallType;
+    channelId?: string;
   } | null>(null);
 
   const handleOpenAI = (prompt?: string, actionLabel?: string) => {
@@ -154,14 +164,36 @@ export default function App() {
       socketService.connect();
 
       const unsubMsg = socketService.subscribe('new_message', (data) => {
-        setPushToast({
-          senderName: data.senderName,
-          senderInitials: data.senderInitials,
-          senderColor: data.senderColor,
-          text: data.message?.text || 'Отправил вложение',
-          senderId: data.senderId,
-        });
+        // Exclude self-messages from push toasts
+        const isFromMe = user && String(data.senderId) === String(user.id);
+        if (isFromMe) {
+          refreshData();
+          return;
+        }
+
+        const isCurrentActiveChat =
+          activeChat &&
+          (String(activeChat.id) === String(data.senderId) ||
+            String(activeChat.id) === String(data.channelGroupId));
+
+        if (!isCurrentActiveChat) {
+          const targetId = data.channelGroupId || data.senderId;
+          setPushToast({
+            senderName: data.senderName,
+            senderInitials: data.senderInitials,
+            senderColor: data.senderColor,
+            text: data.message?.text || 'Отправил вложение',
+            senderId: targetId,
+          });
+        }
         refreshData();
+      });
+
+      const unsubCgDeleted = socketService.subscribe('channel_group_deleted', (data) => {
+        if (data.id) {
+          setActiveChat((prev) => (prev && String(prev.id) === String(data.id) ? null : prev));
+          refreshData();
+        }
       });
 
       const unsubNotif = socketService.subscribe('push_notification', (data) => {
@@ -180,8 +212,8 @@ export default function App() {
       const unsubUserUpdated = socketService.subscribe('user_updated', (data) => {
         if (data.user) {
           setUser((prev) => (prev && prev.id === data.user.id ? { ...prev, ...data.user } : prev));
-          setContacts((prev) =>
-            prev.map((c) =>
+          setContacts((prev) => {
+            const updated = prev.map((c) =>
               c.id === data.user.id
                 ? {
                     ...c,
@@ -191,8 +223,22 @@ export default function App() {
                     handle: data.user.handle || c.handle,
                   }
                 : c
-            )
+            );
+            cacheService.setCachedContacts(updated);
+            return updated;
+          });
+          setActiveChat((prev) =>
+            prev && prev.id === data.user.id
+              ? {
+                  ...prev,
+                  name: data.user.username || prev.name,
+                  avatarUrl: data.user.avatarUrl,
+                  initials: data.user.initials || prev.initials,
+                  handle: data.user.handle || prev.handle,
+                }
+              : prev
           );
+          refreshData();
         }
       });
 
@@ -200,12 +246,43 @@ export default function App() {
         refreshData();
       });
 
+      const unsubIncomingCall = socketService.subscribe('incoming_call', (data) => {
+        if (data.caller && data.caller.id !== user?.id) {
+          setIncomingCall({
+            caller: data.caller,
+            callType: data.callType || 'voice',
+            channelId: data.channelId,
+          });
+        }
+      });
+
+      const unsubLiveStream = socketService.subscribe('live_stream_started', (data) => {
+        const notifItem: AppNotification = {
+          id: `live_${Date.now()}`,
+          userId: user?.id || 'guest',
+          title: `🔴 Прямой эфир в ${data.channelTitle || 'канале'}`,
+          body: `${data.authorName || 'Автор'} начал прямой эфир!`,
+          timestamp: Date.now(),
+          isRead: false,
+        };
+        setNotifications((prev) => [notifItem, ...prev]);
+        setPushToast({
+          senderName: data.channelTitle || 'Канал',
+          text: `🔴 Прямой эфир от ${data.authorName}!`,
+          senderInitials: '🔴',
+          senderColor: 'from-red-500 to-rose-600',
+        });
+      });
+
       return () => {
         unsubMsg();
+        unsubCgDeleted();
         unsubNotif();
         unsubBal();
         unsubUserUpdated();
         unsubNewStory();
+        unsubIncomingCall();
+        unsubLiveStream();
         socketService.disconnect();
       };
     }
@@ -327,10 +404,47 @@ export default function App() {
             text={pushToast.text}
             onClose={() => setPushToast(null)}
             onClick={() => {
-              const target = contacts.find((c) => c.id === pushToast.senderId);
+              const senderId = pushToast.senderId;
+              const target = contacts.find((c) => String(c.id) === String(senderId));
               if (target) {
                 setActiveChat(target);
                 setTab('home');
+              } else if (senderId) {
+                if (senderId.startsWith('cg_')) {
+                  api.getChannelGroupDetails(senderId).then((cg) => {
+                    const channelContact: Contact = {
+                      id: cg.id,
+                      name: cg.title,
+                      handle: cg.handle,
+                      initials: cg.type.includes('channel') ? '📢' : '👥',
+                      color: cg.avatarColor || 'from-sky-500 to-indigo-600',
+                      avatarUrl: cg.avatarUrl,
+                      last: 'Публикация канала',
+                      time: 'Только что',
+                      unread: 0,
+                      isOnline: true,
+                      isChannelGroup: true,
+                    };
+                    setActiveChat(channelContact);
+                    setTab('home');
+                  }).catch(() => {});
+                } else {
+                  const fallbackContact: Contact = {
+                    id: senderId,
+                    name: pushToast.senderName,
+                    avatarUrl: undefined,
+                    initials:
+                      pushToast.senderInitials ||
+                      pushToast.senderName.substring(0, 2).toUpperCase(),
+                    color: pushToast.senderColor || 'from-sky-400 to-blue-600',
+                    handle: '@' + pushToast.senderName.toLowerCase().replace(/\s+/g, ''),
+                    last: pushToast.text,
+                    time: 'только что',
+                    unread: 0,
+                  };
+                  setActiveChat(fallbackContact);
+                  setTab('home');
+                }
               }
               setPushToast(null);
             }}
@@ -359,12 +473,16 @@ export default function App() {
                 onSendCrypto={() => refreshData()}
                 isDark={isDark}
                 isGuest={!user}
+                user={user}
                 onOpenAuth={() => setIsAuthOpen(true)}
                 onOpenUserProfile={(id) => setActiveUserProfileId(id)}
               />
             </div>
           ) : (
             <>
+              {/* Offline & Outbox Sync Status Banner */}
+              <OfflineOutboxBar />
+
               {/* Top Bar Navigation (Only shown for home and wallet screens) */}
               {user && (tab === 'home' || tab === 'wallet') && (
                 <TopBar
@@ -520,17 +638,97 @@ export default function App() {
           recoveryContact={storedRecoveryContact}
         />
 
-        {/* User Public Profile & Shared Media Modal */}
+        {/* User / Channel / Group Profile Modal */}
         {activeUserProfileId && (
-          <UserProfileModal
-            targetUserId={activeUserProfileId}
-            currentUserId={user?.id}
-            onClose={() => setActiveUserProfileId(null)}
-            onOpenChat={(c) => {
-              setActiveChat(c);
-              setTab('home');
-            }}
-          />
+          activeUserProfileId.startsWith('cg_') ? (
+            <ChannelGroupModal
+              channelGroupId={activeUserProfileId}
+              currentUser={user}
+              onClose={() => setActiveUserProfileId(null)}
+              onDeleted={() => {
+                setActiveChat(null);
+                refreshData();
+              }}
+              onUpdated={() => {
+                refreshData();
+              }}
+              onLeft={() => {
+                setActiveChat(null);
+                refreshData();
+              }}
+            />
+          ) : (
+            <UserProfileModal
+              targetUserId={activeUserProfileId}
+              currentUserId={user?.id}
+              onClose={() => setActiveUserProfileId(null)}
+              onOpenChat={(c) => {
+                setActiveChat(c);
+                setTab('home');
+              }}
+            />
+          )
+        )}
+
+        {/* Real-time Incoming Call Banner */}
+        {incomingCall && (
+          <div className="fixed top-4 left-1/2 -translate-x-1/2 z-[99999] w-[92%] max-w-md p-4 rounded-3xl bg-slate-900/95 backdrop-blur-2xl border border-sky-500/40 shadow-2xl text-white animate-bounce-short">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-3 min-w-0">
+                <div className={`h-11 w-11 rounded-full bg-gradient-to-br ${incomingCall.caller?.avatarColor || 'from-sky-400 to-blue-600'} flex items-center justify-center font-bold text-base text-white shadow-lg animate-pulse shrink-0`}>
+                  {incomingCall.caller?.initials || '??'}
+                </div>
+                <div className="min-w-0">
+                  <div className="font-semibold text-xs sm:text-sm flex items-center gap-1.5 truncate">
+                    <span className="truncate">{incomingCall.caller?.username || 'Пользователь'}</span>
+                    <span className="text-[10px] bg-sky-500/20 text-sky-400 px-2 py-0.5 rounded-full border border-sky-500/30 shrink-0">
+                      {incomingCall.callType === 'voice' && 'Голосовой вызов'}
+                      {incomingCall.callType === 'video' && 'Видеовызов'}
+                      {incomingCall.callType === 'group_conference' && 'Конференция'}
+                      {incomingCall.callType === 'channel_stream' && 'Прямой эфир'}
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-slate-400 truncate">Входящий вызов в ORBIT...</div>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  onClick={() => {
+                    socketService.emit('decline_call', { callerId: incomingCall.caller.id });
+                    setIncomingCall(null);
+                  }}
+                  className="h-9 w-9 rounded-full bg-red-600 hover:bg-red-500 flex items-center justify-center text-white shadow-lg active:scale-95 transition"
+                  title="Отклонить"
+                >
+                  <PhoneOff size={16} />
+                </button>
+                <button
+                  onClick={() => {
+                    const targetContact: Contact = {
+                      id: incomingCall.caller.id,
+                      name: incomingCall.caller.username || 'Пользователь',
+                      handle: incomingCall.caller.handle || '@user',
+                      initials: incomingCall.caller.initials || 'U',
+                      color: incomingCall.caller.avatarColor || 'from-sky-400 to-blue-600',
+                      avatarUrl: incomingCall.caller.avatarUrl,
+                      last: 'Входящий вызов',
+                      time: 'Только что',
+                      unread: 0,
+                      isOnline: true,
+                    };
+                    socketService.emit('accept_call', { callerId: incomingCall.caller.id });
+                    setActiveChat(targetContact);
+                    setIncomingCall(null);
+                  }}
+                  className="h-9 w-9 rounded-full bg-emerald-500 hover:bg-emerald-400 flex items-center justify-center text-white shadow-lg active:scale-95 transition animate-pulse"
+                  title="Ответить"
+                >
+                  <Phone size={16} />
+                </button>
+              </div>
+            </div>
+          </div>
         )}
       </div>
     </div>

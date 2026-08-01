@@ -3,7 +3,7 @@ import http from 'http';
 import path from 'path';
 import jwt from 'jsonwebtoken';
 import { createServer as createViteServer } from 'vite';
-import { db, DBMessage, DBTransaction, DBNotification, DBAnnouncement } from './server/db.js';
+import { db, DBMessage, DBTransaction, DBNotification, DBAnnouncement, DBNews } from './server/db.js';
 import {
   authenticateToken,
   registerHandler,
@@ -575,14 +575,18 @@ async function startServer() {
     const { contactId } = req.params;
     const limit = parseInt(req.query.limit as string) || 20;
 
-    const messages = db.getMessagesBetween(currentUserId, contactId, limit);
-    db.markMessagesAsRead(contactId, currentUserId);
-
-    // Notify contact via WebSocket that their messages were read
-    realtimeServer.sendToUser(contactId, {
-      type: 'messages_read',
-      byUserId: currentUserId,
-    });
+    const channelGroup = db.getChannelGroupById(contactId);
+    let messages: DBMessage[] = [];
+    if (channelGroup) {
+      messages = db.getMessagesForChannelGroup(contactId, limit);
+    } else {
+      messages = db.getMessagesBetween(currentUserId, contactId, limit);
+      db.markMessagesAsRead(contactId, currentUserId);
+      realtimeServer.sendToUser(contactId, {
+        type: 'messages_read',
+        byUserId: currentUserId,
+      });
+    }
 
     const formattedMessages = messages.map((m) => formatMessageForUser(m, currentUserId));
 
@@ -598,7 +602,13 @@ async function startServer() {
     const limit = parseInt(req.query.limit as string) || 20;
     const beforeId = req.query.before as string;
 
-    const messages = db.getMessagesBetween(currentUserId, contactId, limit, beforeId);
+    const channelGroup = db.getChannelGroupById(contactId);
+    let messages: DBMessage[] = [];
+    if (channelGroup) {
+      messages = db.getMessagesForChannelGroup(contactId, limit, beforeId);
+    } else {
+      messages = db.getMessagesBetween(currentUserId, contactId, limit, beforeId);
+    }
 
     const formattedMessages = messages.map((m) => formatMessageForUser(m, currentUserId));
 
@@ -660,14 +670,29 @@ async function startServer() {
     const { text, mediaUrl, mediaType, amount, tx } = req.body;
 
     const recipient = db.getUserById(contactId);
-    if (!recipient) {
-      res.status(404).json({ error: 'Получатель не найден' });
+    const channelGroup = db.getChannelGroupById(contactId);
+
+    if (!recipient && !channelGroup) {
+      res.status(404).json({ error: 'Получатель, канал или группа не найдена' });
       return;
     }
 
-    if (db.isUserBlocked(currentUserId, contactId)) {
+    if (recipient && db.isUserBlocked(currentUserId, contactId)) {
       res.status(403).json({ error: 'Невозможно отправить сообщение: пользователь заблокирован' });
       return;
+    }
+
+    if (channelGroup && channelGroup.type.includes('channel')) {
+      const isCreator = channelGroup.creatorId === currentUserId;
+      const isAdmin = (channelGroup.adminIds || []).includes(currentUserId);
+      const isModerator = (channelGroup.moderatorIds || []).includes(currentUserId);
+      const userRole = currentUser ? db.getUserRole(currentUser) : 'user';
+      const isSysAdmin = ['admin', 'sysadmin'].includes(userRole);
+
+      if (!isCreator && !isAdmin && !isModerator && !isSysAdmin) {
+        res.status(403).json({ error: 'В каналах могут публиковать записи только авторы, администраторы и модераторы' });
+        return;
+      }
     }
 
     const newMessage: DBMessage = {
@@ -697,43 +722,89 @@ async function startServer() {
       isRead: false,
     };
 
-    // Send real-time notification & message to recipient via WebSocket
-    const recipientMessagePayload = {
-      type: 'new_message',
-      senderId: currentUserId,
-      senderName: currentUser?.username || 'User',
-      senderInitials: currentUser?.initials || 'U',
-      senderColor: currentUser?.avatarColor || 'from-sky-300 to-indigo-200',
-      message: {
-        id: newMessage.id,
-        from: 'contact',
-        text: newMessage.text,
-        mediaUrl: newMessage.mediaUrl,
-        mediaType: newMessage.mediaType,
-        amount: newMessage.amount,
-        tx: newMessage.isTx,
-        timestamp: newMessage.timestamp,
+    if (channelGroup) {
+      const groupPayload = {
+        type: 'new_message',
+        senderId: currentUserId,
+        senderName: currentUser?.username || 'User',
+        senderInitials: currentUser?.initials || 'U',
+        senderColor: currentUser?.avatarColor || 'from-sky-300 to-indigo-200',
+        channelGroupId: contactId,
+        message: {
+          id: newMessage.id,
+          from: 'contact',
+          text: newMessage.text,
+          mediaUrl: newMessage.mediaUrl,
+          mediaType: newMessage.mediaType,
+          amount: newMessage.amount,
+          tx: newMessage.isTx,
+          timestamp: newMessage.timestamp,
+          isRead: false,
+        },
+      };
+
+      realtimeServer.broadcast(groupPayload);
+
+      // If channel post, automatically publish to News Feed
+      if (channelGroup.type.includes('channel')) {
+        const newsItem: DBNews = {
+          id: `news_ch_${channelGroup.id}_${Date.now()}`,
+          userId: currentUserId,
+          channelId: channelGroup.id,
+          authorName: channelGroup.title,
+          authorHandle: channelGroup.handle || `@channel_${channelGroup.id}`,
+          authorAvatar: channelGroup.avatarUrl,
+          tag: 'КАНАЛ',
+          title: (text || 'Публикация канала').substring(0, 60),
+          content: text || '',
+          mediaUrl,
+          mediaType: mediaType === 'video_circle' || mediaType === 'video' ? 'video' : 'image',
+          timestamp: 'Только что',
+          accent: channelGroup.avatarColor || 'from-sky-500 to-indigo-500',
+          likes: [],
+          comments: [],
+          sharesCount: 0,
+        };
+        db.addNews(newsItem);
+        realtimeServer.broadcast({ type: 'new_news', news: newsItem });
+      }
+    } else if (recipient) {
+      const recipientMessagePayload = {
+        type: 'new_message',
+        senderId: currentUserId,
+        senderName: currentUser?.username || 'User',
+        senderInitials: currentUser?.initials || 'U',
+        senderColor: currentUser?.avatarColor || 'from-sky-300 to-indigo-200',
+        message: {
+          id: newMessage.id,
+          from: 'contact',
+          text: newMessage.text,
+          mediaUrl: newMessage.mediaUrl,
+          mediaType: newMessage.mediaType,
+          amount: newMessage.amount,
+          tx: newMessage.isTx,
+          timestamp: newMessage.timestamp,
+          isRead: false,
+        },
+      };
+
+      realtimeServer.sendToUser(contactId, recipientMessagePayload);
+
+      const notif: DBNotification = {
+        id: `notif_${Date.now()}`,
+        userId: contactId,
+        title: currentUser?.username || 'New Message',
+        body: text || (mediaType ? `Sent an ${mediaType}` : 'Sent a message'),
+        timestamp: Date.now(),
         isRead: false,
-      },
-    };
+      };
+      db.addNotification(notif);
 
-    realtimeServer.sendToUser(contactId, recipientMessagePayload);
-
-    // Add push notification for recipient
-    const notif: DBNotification = {
-      id: `notif_${Date.now()}`,
-      userId: contactId,
-      title: currentUser?.username || 'New Message',
-      body: text || (mediaType ? `Sent an ${mediaType}` : 'Sent a message'),
-      timestamp: Date.now(),
-      isRead: false,
-    };
-    db.addNotification(notif);
-
-    realtimeServer.sendToUser(contactId, {
-      type: 'push_notification',
-      notification: notif,
-    });
+      realtimeServer.sendToUser(contactId, {
+        type: 'push_notification',
+        notification: notif,
+      });
+    }
 
     res.status(201).json(formattedMessage);
   });
@@ -917,10 +988,16 @@ async function startServer() {
     const user = db.getUserById(currentUserId);
     const { title, content, tag, accent, mediaUrl, mediaType } = req.body;
 
-    if (!title || !title.trim()) {
-      res.status(400).json({ error: 'Заголовок новости обязателен' });
+    const rawTitle = (title || '').trim();
+    const rawContent = (content || '').trim();
+
+    if (!rawTitle && !rawContent) {
+      res.status(400).json({ error: 'Укажите заголовок или текст новости' });
       return;
     }
+
+    const finalTitle = rawTitle || (rawContent.length > 50 ? rawContent.substring(0, 50) + '...' : rawContent);
+    const finalContent = rawContent || rawTitle;
 
     const newsItem: any = {
       id: `news_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
@@ -928,8 +1005,8 @@ async function startServer() {
       authorName: user ? user.username : 'Пользователь',
       authorHandle: user ? user.handle : '@user',
       authorAvatar: user?.avatarUrl,
-      title: title.trim(),
-      content: (content || '').trim(),
+      title: finalTitle,
+      content: finalContent,
       tag: tag || 'ПОСТ',
       accent: accent || 'from-sky-500 to-blue-600',
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
@@ -941,19 +1018,72 @@ async function startServer() {
     };
 
     db.addNews(newsItem);
-    res.status(201).json(newsItem);
+
+    const formatted = {
+      id: newsItem.id,
+      userId: newsItem.userId,
+      authorName: newsItem.authorName,
+      authorHandle: newsItem.authorHandle,
+      authorAvatar: newsItem.authorAvatar,
+      title: newsItem.title,
+      content: newsItem.content,
+      tag: newsItem.tag,
+      timestamp: newsItem.timestamp,
+      accent: newsItem.accent,
+      mediaUrl: newsItem.mediaUrl,
+      mediaType: newsItem.mediaType,
+      likesCount: 0,
+      userLiked: false,
+      commentsCount: 0,
+      comments: [],
+      sharesCount: 0,
+    };
+
+    res.status(201).json(formatted);
+
+    realtimeServer.broadcast({
+      type: 'new_news',
+      news: formatted,
+    });
   });
 
   app.put('/api/news/:id', authenticateToken, (req: AuthenticatedRequest, res) => {
     const currentUserId = req.user!.id;
-    const { title, content, mediaUrl } = req.body;
+    const { title, content, mediaUrl, tag, mediaType } = req.body;
     const updated = db.updateNews(req.params.id, currentUserId, {
-      title,
-      content,
+      title: title ? title.trim() : undefined,
+      content: content ? content.trim() : undefined,
       mediaUrl,
+      tag,
+      mediaType,
     });
     if (updated) {
-      res.json({ success: true, news: updated });
+      const formatted = {
+        id: updated.id,
+        userId: updated.userId,
+        authorName: updated.authorName,
+        authorHandle: updated.authorHandle,
+        authorAvatar: updated.authorAvatar,
+        title: updated.title,
+        content: updated.content,
+        tag: updated.tag,
+        timestamp: updated.timestamp,
+        accent: updated.accent,
+        mediaUrl: updated.mediaUrl,
+        mediaType: updated.mediaType,
+        likesCount: (updated.likes || []).length,
+        userLiked: (updated.likes || []).includes(currentUserId),
+        commentsCount: (updated.comments || []).length,
+        comments: updated.comments || [],
+        sharesCount: updated.sharesCount || 0,
+      };
+
+      res.json({ success: true, news: formatted });
+
+      realtimeServer.broadcast({
+        type: 'news_updated',
+        news: formatted,
+      });
     } else {
       res.status(403).json({ error: 'Не удалось обновить новость' });
     }
@@ -961,9 +1091,14 @@ async function startServer() {
 
   app.delete('/api/news/:id', authenticateToken, (req: AuthenticatedRequest, res) => {
     const currentUserId = req.user!.id;
-    const ok = db.deleteNews(req.params.id, currentUserId);
+    const newsId = req.params.id;
+    const ok = db.deleteNews(newsId, currentUserId);
     if (ok) {
       res.json({ success: true, message: 'Новость успешно удалена' });
+      realtimeServer.broadcast({
+        type: 'news_deleted',
+        newsId,
+      });
     } else {
       res.status(403).json({ error: 'Не удалось удалить новость' });
     }
@@ -975,8 +1110,38 @@ async function startServer() {
     if (result) {
       res.json({ success: true, ...result });
     } else {
-      res.status(440).json({ error: 'Новость не найдена' });
+      res.status(404).json({ error: 'Новость не найдена' });
     }
+  });
+
+  app.post('/api/news/:id/report', authenticateToken, (req: AuthenticatedRequest, res) => {
+    const currentUserId = req.user!.id;
+    const news = db.getNewsById(req.params.id);
+    if (!news) {
+      res.status(404).json({ error: 'Новость не найдена' });
+      return;
+    }
+    const { reason, comment } = req.body;
+    db.addReport({
+      id: `report_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      reporterId: currentUserId,
+      targetUserId: news.userId || 'system',
+      reason: reason || 'Жалоба на новость',
+      comment: comment || news.title,
+      timestamp: Date.now(),
+    });
+    res.json({ success: true, message: 'Жалоба отправлена на рассмотрение модераторам' });
+  });
+
+  app.post('/api/users/:targetUserId/block', authenticateToken, (req: AuthenticatedRequest, res) => {
+    const currentUserId = req.user!.id;
+    const { targetUserId } = req.params;
+    if (currentUserId === targetUserId) {
+      res.status(400).json({ error: 'Нельзя заблокировать самого себя' });
+      return;
+    }
+    db.blockUser(currentUserId, targetUserId);
+    res.json({ success: true, message: 'Пользователь заблокирован' });
   });
 
   app.post('/api/news/:id/comment', authenticateToken, (req: AuthenticatedRequest, res) => {
@@ -1019,14 +1184,29 @@ async function startServer() {
       return;
     }
 
+    const cleanTitle = title.trim();
     const cleanHandle = (handle || '').trim().replace(/^@/, '');
+
+    // Check for existing channel or group with identical title or handle created by this user
+    const existing = db.getChannelsGroups().find((cg) => {
+      if (cg.creatorId !== currentUserId) return false;
+      const sameTitle = cg.title.toLowerCase() === cleanTitle.toLowerCase();
+      const sameHandle = cleanHandle && cg.handle.toLowerCase().replace(/^@/, '') === cleanHandle.toLowerCase();
+      return sameTitle || sameHandle;
+    });
+
+    if (existing) {
+      res.status(200).json(existing);
+      return;
+    }
+
     const uniqueSlug = cleanHandle || `cg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
     const inviteLink = `https://t.me/${uniqueSlug}`;
 
     const newGroupChannel: any = {
       id: `cg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
       type: type || 'public_channel',
-      title: title.trim(),
+      title: cleanTitle,
       handle: `@${uniqueSlug}`,
       description: (description || '').trim(),
       avatarUrl,
@@ -1042,10 +1222,174 @@ async function startServer() {
     res.status(201).json(newGroupChannel);
   });
 
+  app.get('/api/channels-groups/:id', authenticateToken, (req: AuthenticatedRequest, res) => {
+    const cg = db.getChannelGroupById(req.params.id);
+    if (!cg) {
+      res.status(404).json({ error: 'Канал или группа не найдена' });
+      return;
+    }
+
+    const members = (cg.memberIds || []).map((mId) => {
+      const u = db.getUserById(mId);
+      let roleInGroup: 'creator' | 'admin' | 'moderator' | 'member' = 'member';
+      if (mId === cg.creatorId) roleInGroup = 'creator';
+      else if ((cg.adminIds || []).includes(mId)) roleInGroup = 'admin';
+      else if ((cg.moderatorIds || []).includes(mId)) roleInGroup = 'moderator';
+
+      return {
+        id: mId,
+        username: u ? u.username : 'Пользователь',
+        handle: u ? u.handle : '@user',
+        initials: u ? u.initials : 'U',
+        avatarColor: u ? u.avatarColor : 'from-sky-400 to-indigo-500',
+        avatarUrl: u ? u.avatarUrl : undefined,
+        roleInGroup,
+      };
+    });
+
+    res.json({ ...cg, members });
+  });
+
+  app.put('/api/channels-groups/:id', authenticateToken, (req: AuthenticatedRequest, res) => {
+    const currentUserId = req.user!.id;
+    const cg = db.getChannelGroupById(req.params.id);
+    if (!cg) {
+      res.status(404).json({ error: 'Канал или группа не найдена' });
+      return;
+    }
+
+    const currentUser = db.getUserById(currentUserId);
+    const userRole = currentUser ? db.getUserRole(currentUser) : 'user';
+    const isSysAdmin = ['admin', 'sysadmin'].includes(userRole);
+    const isCreator = cg.creatorId === currentUserId;
+    const isAdmin = (cg.adminIds || []).includes(currentUserId);
+
+    if (!isCreator && !isAdmin && !isSysAdmin) {
+      res.status(403).json({ error: 'У вас нет прав для изменения настроек этого канала/группы' });
+      return;
+    }
+
+    const { title, description, handle, type, allowCalls, slowMode, signPosts, avatarUrl, avatarColor } = req.body;
+    const updates: any = {};
+
+    if (title) updates.title = title.trim();
+    if (description !== undefined) updates.description = description.trim();
+    if (handle) {
+      const cleanHandle = handle.replace(/[^a-zA-Z0-9_]/g, '').toLowerCase();
+      updates.handle = `@${cleanHandle}`;
+    }
+    if (type) updates.type = type;
+    if (allowCalls !== undefined) updates.allowCalls = allowCalls;
+    if (slowMode !== undefined) updates.slowMode = Number(slowMode);
+    if (signPosts !== undefined) updates.signPosts = signPosts;
+    if (avatarUrl !== undefined) updates.avatarUrl = avatarUrl;
+    if (avatarColor) updates.avatarColor = avatarColor;
+
+    const updated = db.updateChannelGroup(req.params.id, updates);
+    realtimeServer.broadcast({ type: 'channel_group_updated', channelGroup: updated });
+    res.json({ success: true, channelGroup: updated });
+  });
+
+  app.delete('/api/channels-groups/:id', authenticateToken, (req: AuthenticatedRequest, res) => {
+    const currentUserId = req.user!.id;
+    const cg = db.getChannelGroupById(req.params.id);
+    if (!cg) {
+      res.status(404).json({ error: 'Канал или группа не найдена' });
+      return;
+    }
+
+    const currentUser = db.getUserById(currentUserId);
+    const userRole = currentUser ? db.getUserRole(currentUser) : 'user';
+    const isSysAdmin = ['admin', 'sysadmin'].includes(userRole);
+    const isCreator = cg.creatorId === currentUserId;
+    const isAdmin = (cg.adminIds || []).includes(currentUserId);
+
+    if (!isCreator && !isAdmin && !isSysAdmin) {
+      res.status(403).json({ error: 'Только создатель или администратор может удалить данный канал/группу' });
+      return;
+    }
+
+    const ok = db.deleteChannelGroup(req.params.id);
+    if (ok) {
+      realtimeServer.broadcast({ type: 'channel_group_deleted', id: req.params.id });
+      res.json({ success: true, message: 'Канал / группа успешно удалена' });
+    } else {
+      res.status(500).json({ error: 'Не удалось удалить канал/группу' });
+    }
+  });
+
+  app.post('/api/channels-groups/:id/toggle-admin', authenticateToken, (req: AuthenticatedRequest, res) => {
+    const currentUserId = req.user!.id;
+    const cg = db.getChannelGroupById(req.params.id);
+    if (!cg) {
+      res.status(404).json({ error: 'Канал или группа не найдена' });
+      return;
+    }
+
+    if (cg.creatorId !== currentUserId) {
+      res.status(403).json({ error: 'Только владелец канала/группы может назначить администраторов' });
+      return;
+    }
+
+    const { targetUserId } = req.body;
+    const updated = db.toggleChannelGroupAdmin(req.params.id, targetUserId);
+    realtimeServer.broadcast({ type: 'channel_group_updated', channelGroup: updated });
+    res.json({ success: true, channelGroup: updated });
+  });
+
+  app.post('/api/channels-groups/:id/toggle-moderator', authenticateToken, (req: AuthenticatedRequest, res) => {
+    const currentUserId = req.user!.id;
+    const cg = db.getChannelGroupById(req.params.id);
+    if (!cg) {
+      res.status(404).json({ error: 'Канал или группа не найдена' });
+      return;
+    }
+
+    const isCreator = cg.creatorId === currentUserId;
+    const isAdmin = (cg.adminIds || []).includes(currentUserId);
+    if (!isCreator && !isAdmin) {
+      res.status(403).json({ error: 'Только администраторы могут назначать модераторов' });
+      return;
+    }
+
+    const { targetUserId } = req.body;
+    const updated = db.toggleChannelGroupModerator(req.params.id, targetUserId);
+    realtimeServer.broadcast({ type: 'channel_group_updated', channelGroup: updated });
+    res.json({ success: true, channelGroup: updated });
+  });
+
+  app.post('/api/channels-groups/:id/kick', authenticateToken, (req: AuthenticatedRequest, res) => {
+    const currentUserId = req.user!.id;
+    const cg = db.getChannelGroupById(req.params.id);
+    if (!cg) {
+      res.status(404).json({ error: 'Канал или группа не найдена' });
+      return;
+    }
+
+    const isCreator = cg.creatorId === currentUserId;
+    const isAdmin = (cg.adminIds || []).includes(currentUserId);
+    if (!isCreator && !isAdmin) {
+      res.status(403).json({ error: 'У вас нет прав для исключения участников' });
+      return;
+    }
+
+    const { targetUserId } = req.body;
+    if (targetUserId === cg.creatorId) {
+      res.status(400).json({ error: 'Нельзя исключить владельца группы' });
+      return;
+    }
+
+    db.leaveChannelGroup(req.params.id, targetUserId);
+    const updated = db.getChannelGroupById(req.params.id);
+    realtimeServer.broadcast({ type: 'channel_group_updated', channelGroup: updated });
+    res.json({ success: true, channelGroup: updated });
+  });
+
   app.post('/api/channels-groups/:id/join', authenticateToken, (req: AuthenticatedRequest, res) => {
     const currentUserId = req.user!.id;
     const item = db.joinChannelGroup(req.params.id, currentUserId);
     if (item) {
+      realtimeServer.broadcast({ type: 'channel_group_updated', channelGroup: item });
       res.json({ success: true, channelGroup: item });
     } else {
       res.status(404).json({ error: 'Канал или группа не найдена' });
@@ -1056,6 +1400,8 @@ async function startServer() {
     const currentUserId = req.user!.id;
     const ok = db.leaveChannelGroup(req.params.id, currentUserId);
     if (ok) {
+      const updated = db.getChannelGroupById(req.params.id);
+      realtimeServer.broadcast({ type: 'channel_group_updated', channelGroup: updated });
       res.json({ success: true });
     } else {
       res.status(400).json({ error: 'Не удалось покинуть группу/канал' });
@@ -1075,6 +1421,20 @@ async function startServer() {
     }
     if (firstName !== undefined) updates.firstName = firstName.trim();
     if (lastName !== undefined) updates.lastName = lastName.trim();
+
+    // If firstName/lastName updated but no explicit username passed, construct full username
+    if ((firstName !== undefined || lastName !== undefined) && !username) {
+      const currentUserInDb = db.getUserById(userId);
+      const fName = updates.firstName !== undefined ? updates.firstName : (currentUserInDb?.firstName || '');
+      const lName = updates.lastName !== undefined ? updates.lastName : (currentUserInDb?.lastName || '');
+      const fullName = `${fName} ${lName}`.trim();
+      if (fullName) {
+        updates.username = fullName;
+        const parts = fullName.split(' ');
+        updates.initials = parts.length > 1 ? (parts[0][0] + parts[1][0]).toUpperCase() : fullName.substring(0, 2).toUpperCase();
+      }
+    }
+
     if (handle) {
       const handleVal = validateNicknameServer(handle);
       if (!handleVal.isValid) {
@@ -1123,6 +1483,13 @@ async function startServer() {
 
     const { passwordHash: _, ...safeUser } = updatedUser;
     safeUser.role = db.getUserRole(updatedUser);
+
+    // Broadcast profile update to all clients in real-time
+    realtimeServer.broadcast({
+      type: 'user_updated',
+      user: safeUser,
+    });
+
     res.json({ user: safeUser });
   });
 

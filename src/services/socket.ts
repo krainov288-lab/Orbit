@@ -71,6 +71,10 @@ class SocketService {
     }
   }
 
+  public emit(eventType: string, data: any = {}): void {
+    this.send({ type: eventType, ...data });
+  }
+
   public disconnect(): void {
     if (this.ws) {
       this.ws.close();

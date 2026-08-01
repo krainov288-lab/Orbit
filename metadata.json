@@ -1,6 +1,6 @@
 {
   "name": "ORBIT - Messenger & Wallet",
   "description": "Messenger, AI assistant, and crypto wallet app with real-time chat, JWT auth, and media sharing",
-  "requestFramePermissions": [],
+  "requestFramePermissions": ["microphone"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

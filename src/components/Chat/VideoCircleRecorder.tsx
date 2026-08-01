@@ -37,6 +37,33 @@ export const VideoCircleRecorder: React.FC<VideoCircleRecorderProps> = ({
 
   const maxDuration = 60;
 
+  const stopStream = () => {
+    if (streamRef.current) {
+      const customStream = streamRef.current as unknown as { _sampleInterval?: NodeJS.Timeout };
+      if (customStream._sampleInterval) clearInterval(customStream._sampleInterval);
+      streamRef.current.getTracks().forEach((t) => {
+        try {
+          t.enabled = false;
+          t.stop();
+        } catch {}
+      });
+      streamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+  };
+
+  const handleCancelCircle = () => {
+    stopStream();
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      try {
+        mediaRecorderRef.current.stop();
+      } catch {}
+    }
+    onCancel();
+  };
+
   // Initialize camera, audio context, audio analyzer & recording
   useEffect(() => {
     chunksRef.current = [];
@@ -128,11 +155,7 @@ export const VideoCircleRecorder: React.FC<VideoCircleRecorderProps> = ({
       if (audioContextRef.current) {
         audioContextRef.current.close().catch(() => {});
       }
-      if (streamRef.current) {
-        const customStream = streamRef.current as unknown as { _sampleInterval?: NodeJS.Timeout };
-        if (customStream._sampleInterval) clearInterval(customStream._sampleInterval);
-        streamRef.current.getTracks().forEach((t) => t.stop());
-      }
+      stopStream();
       if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
         try {
           mediaRecorderRef.current.stop();
@@ -229,9 +252,7 @@ export const VideoCircleRecorder: React.FC<VideoCircleRecorderProps> = ({
 
     if (recorder && recorder.state !== 'inactive') {
       recorder.onstop = () => {
-        if (streamRef.current) {
-          streamRef.current.getTracks().forEach((t) => t.stop());
-        }
+        stopStream();
         const mimeType = recorder.mimeType || 'video/webm';
         const blob = new Blob(chunksRef.current, { type: mimeType });
         const mediaUrl = blob.size > 0 ? URL.createObjectURL(blob) : '';
@@ -239,6 +260,7 @@ export const VideoCircleRecorder: React.FC<VideoCircleRecorderProps> = ({
       };
       recorder.stop();
     } else {
+      stopStream();
       const blob = new Blob(chunksRef.current, { type: 'video/webm' });
       const mediaUrl =
         blob.size > 0
@@ -289,7 +311,7 @@ export const VideoCircleRecorder: React.FC<VideoCircleRecorderProps> = ({
           </div>
 
           <button
-            onClick={onCancel}
+            onClick={handleCancelCircle}
             className="h-9 w-9 rounded-full bg-slate-800/30 hover:bg-slate-800/50 flex items-center justify-center transition active:scale-95"
             title="Закрыть"
           >

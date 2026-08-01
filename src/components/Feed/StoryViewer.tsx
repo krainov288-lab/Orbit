@@ -8,9 +8,13 @@ import {
   Heart,
   MoreVertical,
   Users,
+  Volume2,
+  VolumeX,
+  Loader2,
 } from 'lucide-react';
 import { api } from '../../services/api';
 import { isVideoUrl } from '../../utils/media';
+import { triggerHaptic } from '../../utils/haptics';
 
 interface StoryViewerProps {
   story: Story;
@@ -34,21 +38,56 @@ export const StoryViewer: React.FC<StoryViewerProps> = ({
   const [commentText, setCommentText] = useState('');
   const [showCommentsModal, setShowCommentsModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [showConfirmDelete, setShowConfirmDelete] = useState(false);
 
-  // Pre-selected active reaction emoji (default: ❤️)
+  // Audio mute state for videos
+  const [isMuted, setIsMuted] = useState(false);
+  const [isMediaLoading, setIsMediaLoading] = useState(true);
+
+  useEffect(() => {
+    setIsMediaLoading(true);
+  }, [activeSlideIndex]);
+
+  // Floating reaction picker on long-press
+  const [showReactionPicker, setShowReactionPicker] = useState(false);
+
+  // Focus state for comment input (auto-pauses story)
+  const [isCommentInputFocused, setIsCommentInputFocused] = useState(false);
+
+  // Vertical comments carousel active index
+  const [activeCommentIndex, setActiveCommentIndex] = useState<number>(0);
+
+  // Pre-selected active reaction emoji
   const [selectedEmoji, setSelectedEmoji] = useState<string>('❤️');
-  // Bottom-right reaction animations queue
+  // Bottom-right reaction pop animations queue
   const [bottomRightAnims, setBottomRightAnims] = useState<Array<{ id: string; emoji: string }>>([]);
 
   // Local story state for reactive updates
   const [currentStory, setCurrentStory] = useState<Story>(story);
 
   const SLIDE_DURATION = 5000; // 5 seconds per slide
-  const lastTapRef = useRef<number>(0);
+  const longPressTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const isLongPressRef = useRef<boolean>(false);
+  const touchStartYRef = useRef<number>(0);
+  const lastTapTimeRef = useRef<number>(0);
+  const singleTapTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const [doubleTapHeart, setDoubleTapHeart] = useState<{ id: string; emoji: string } | null>(null);
 
   const isOwner = currentUser?.id ? String(currentUser.id) === String(currentStory.userId) : true;
   const isAdmin = currentUser?.role === 'admin' || currentUser?.role === 'sysadmin';
   const canManage = isOwner || isAdmin;
+
+  // Sync active comment index to the latest comment when comments change
+  useEffect(() => {
+    if (currentStory.comments && currentStory.comments.length > 0) {
+      setActiveCommentIndex(currentStory.comments.length - 1);
+    }
+  }, [currentStory.comments?.length]);
+
+  // Sync local story state if prop changes
+  useEffect(() => {
+    setCurrentStory(story);
+  }, [story]);
 
   // Mark story as viewed on mount
   useEffect(() => {
@@ -58,29 +97,51 @@ export const StoryViewer: React.FC<StoryViewerProps> = ({
     }
   }, [currentStory.id]);
 
-  // Slide timer progress
+  // Slide timer progress & auto-pause conditions
   useEffect(() => {
-    if (isPaused || showCommentsModal || showSettingsModal) return;
+    if (
+      isPaused ||
+      showCommentsModal ||
+      showSettingsModal ||
+      showReactionPicker ||
+      isCommentInputFocused ||
+      showConfirmDelete
+    ) {
+      return;
+    }
 
     const interval = 50; // update every 50ms
     const timer = setInterval(() => {
       setProgress((prev) => {
-        if (prev >= 100) {
+        const next = prev + (interval / SLIDE_DURATION) * 100;
+        if (next >= 100) {
           if (activeSlideIndex < slides.length - 1) {
             setActiveSlideIndex((idx) => idx + 1);
             return 0;
           } else {
             clearInterval(timer);
-            onClose();
+            setTimeout(() => {
+              onClose();
+            }, 0);
             return 100;
           }
         }
-        return prev + (interval / SLIDE_DURATION) * 100;
+        return next;
       });
     }, interval);
 
     return () => clearInterval(timer);
-  }, [activeSlideIndex, slides.length, isPaused, showCommentsModal, showSettingsModal, onClose]);
+  }, [
+    activeSlideIndex,
+    slides.length,
+    isPaused,
+    showCommentsModal,
+    showSettingsModal,
+    showReactionPicker,
+    isCommentInputFocused,
+    showConfirmDelete,
+    onClose,
+  ]);
 
   const handleNextSlide = (e?: React.MouseEvent) => {
     e?.stopPropagation();
@@ -110,11 +171,8 @@ export const StoryViewer: React.FC<StoryViewerProps> = ({
 
   const handleAddReaction = async (emoji: string) => {
     if (currentStory.hideReactions) return;
-    
-    // Select this emoji as the active reaction
+
     setSelectedEmoji(emoji);
-    
-    // Trigger bottom-right animation
     spawnBottomRightAnimation(emoji);
 
     try {
@@ -130,16 +188,65 @@ export const StoryViewer: React.FC<StoryViewerProps> = ({
     }
   };
 
-  // Double tap handler on main story image
-  const handleMediaTap = (e: React.MouseEvent | React.TouchEvent) => {
-    const now = Date.now();
-    const DOUBLE_TAP_DELAY = 300; // ms
-    if (now - lastTapRef.current < DOUBLE_TAP_DELAY) {
-      e.stopPropagation();
-      // Double tap detected! Trigger reaction with pre-selected emoji
-      handleAddReaction(selectedEmoji);
+  // Touch and mouse long-press triggers reaction picker & pauses story
+  const handleMediaPressStart = () => {
+    isLongPressRef.current = false;
+    if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+
+    longPressTimerRef.current = setTimeout(() => {
+      isLongPressRef.current = true;
+      triggerHaptic('impactMedium');
+      setShowReactionPicker(true);
+      setIsPaused(true);
+    }, 450);
+  };
+
+  const handleMediaPressEnd = () => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
     }
-    lastTapRef.current = now;
+  };
+
+  // Tap handler: Single-tap toggles video sound, Double-tap adds reaction with heart animation
+  const handleMediaTap = (e: React.MouseEvent) => {
+    if (isLongPressRef.current) {
+      isLongPressRef.current = false;
+      return;
+    }
+
+    const now = Date.now();
+    const DOUBLE_TAP_THRESHOLD = 300;
+
+    if (now - lastTapTimeRef.current < DOUBLE_TAP_THRESHOLD) {
+      // DOUBLE TAP DETECTED: Trigger Reaction & Big Animated Heart
+      if (singleTapTimerRef.current) {
+        clearTimeout(singleTapTimerRef.current);
+        singleTapTimerRef.current = null;
+      }
+      lastTapTimeRef.current = 0;
+
+      const emojiToUse = selectedEmoji || '❤️';
+      handleAddReaction(emojiToUse);
+      triggerHaptic('impactMedium');
+
+      const heartId = `heart_${now}`;
+      setDoubleTapHeart({ id: heartId, emoji: emojiToUse });
+      setTimeout(() => {
+        setDoubleTapHeart(null);
+      }, 900);
+    } else {
+      // SINGLE TAP: Schedule sound toggle if video
+      lastTapTimeRef.current = now;
+      if (singleTapTimerRef.current) clearTimeout(singleTapTimerRef.current);
+
+      singleTapTimerRef.current = setTimeout(() => {
+        if (isVideoUrl(slides[activeSlideIndex])) {
+          setIsMuted((prev) => !prev);
+          triggerHaptic('selection');
+        }
+      }, DOUBLE_TAP_THRESHOLD);
+    }
   };
 
   const handleSendComment = async (e: React.FormEvent) => {
@@ -148,6 +255,8 @@ export const StoryViewer: React.FC<StoryViewerProps> = ({
 
     const textToSend = commentText.trim();
     setCommentText('');
+    setIsCommentInputFocused(false);
+    setIsPaused(false);
 
     try {
       const res = await api.commentOnStory(currentStory.id, textToSend);
@@ -157,21 +266,23 @@ export const StoryViewer: React.FC<StoryViewerProps> = ({
           comments: [...(currentStory.comments || []), res.comment],
         };
         setCurrentStory(updated);
+        setActiveCommentIndex(updated.comments.length - 1);
         if (onUpdateStory) onUpdateStory(updated);
       }
     } catch (err: any) {
-      alert(err.message || 'Ошибка отправки комментария');
+      console.error('Error adding comment:', err);
     }
   };
 
   const handleDelete = async () => {
-    if (!confirm('Вы уверены, что хотите удалить эту историю?')) return;
     try {
       await api.deleteStory(currentStory.id);
       if (onDeleteStory) onDeleteStory(currentStory.id);
       onClose();
     } catch (err: any) {
-      alert(err.message || 'Ошибка удаления истории');
+      console.error('Error deleting story:', err);
+      if (onDeleteStory) onDeleteStory(currentStory.id);
+      onClose();
     }
   };
 
@@ -203,15 +314,55 @@ export const StoryViewer: React.FC<StoryViewerProps> = ({
     }
   };
 
-  const allowedEmojis = currentStory.allowedReactions || ['❤️', '🔥', '👏', '😍', '😂', '😮'];
+  const allowedEmojis = currentStory.allowedReactions || ['❤️', '🔥', '👏', '😍', '😂', '😮', '👍', '🎉'];
+
+  // Comments & Carousel Helpers
+  const comments = currentStory.comments || [];
+  const curComment = comments.length > 0 ? comments[activeCommentIndex % comments.length] || comments[comments.length - 1] : null;
+  const nextComment = comments.length > 1 ? comments[(activeCommentIndex + 1) % comments.length] : null;
+
+  const formatSnippet = (text: string) => {
+    if (!text) return '';
+    return text.length > 10 ? text.slice(0, 10) + '...' : text;
+  };
+
+  const handleCarouselNext = (e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    if (comments.length === 0) return;
+    setActiveCommentIndex((prev) => (prev + 1) % comments.length);
+    triggerHaptic('selection');
+  };
+
+  const handleCarouselPrev = (e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    if (comments.length === 0) return;
+    setActiveCommentIndex((prev) => (prev - 1 + comments.length) % comments.length);
+    triggerHaptic('selection');
+  };
+
+  // Carousel vertical touch swipe
+  const handleCarouselTouchStart = (e: React.TouchEvent) => {
+    touchStartYRef.current = e.touches[0].clientY;
+  };
+
+  const handleCarouselTouchEnd = (e: React.TouchEvent) => {
+    const deltaY = e.changedTouches[0].clientY - touchStartYRef.current;
+    if (deltaY < -15) {
+      handleCarouselNext();
+    } else if (deltaY > 15) {
+      handleCarouselPrev();
+    }
+  };
 
   return (
     <div
       className="fixed inset-0 z-50 bg-slate-950/90 dark:bg-slate-950/95 backdrop-blur-xl flex flex-col justify-between select-none animate-fade-in overflow-hidden"
-      onMouseDown={() => setIsPaused(true)}
-      onMouseUp={() => setIsPaused(false)}
-      onTouchStart={() => setIsPaused(true)}
-      onTouchEnd={() => setIsPaused(false)}
+      onClick={() => {
+        if (isCommentInputFocused) {
+          setIsCommentInputFocused(false);
+          setIsPaused(false);
+        }
+      }}
     >
       <style>{`
         @keyframes storyReactionPop {
@@ -297,7 +448,7 @@ export const StoryViewer: React.FC<StoryViewerProps> = ({
               <X size={18} />
             </button>
 
-            {/* Minimalist Glassmorphism Dropdown Menu */}
+            {/* Dropdown Settings Menu */}
             {showSettingsModal && (
               <div
                 className="absolute top-11 right-0 z-50 w-56 p-2 rounded-2xl bg-black/60 dark:bg-slate-900/80 backdrop-blur-2xl border border-white/20 dark:border-slate-700/60 shadow-2xl space-y-1 animate-scale-up text-white select-none"
@@ -332,9 +483,10 @@ export const StoryViewer: React.FC<StoryViewerProps> = ({
                 <div className="my-1 border-t border-white/10" />
 
                 <button
-                  onClick={async () => {
+                  onClick={(e) => {
+                    e.stopPropagation();
                     setShowSettingsModal(false);
-                    await handleDelete();
+                    setShowConfirmDelete(true);
                   }}
                   className="w-full flex items-center justify-between px-3 py-2 rounded-xl hover:bg-red-500/25 text-red-300 transition text-xs font-semibold"
                 >
@@ -347,48 +499,94 @@ export const StoryViewer: React.FC<StoryViewerProps> = ({
         </div>
       </div>
 
-      {/* Main Slide Content Area with Tap Navigation & Double Tap Reaction */}
+      {/* Main Slide Content Area with Single/Double-Tap Reaction & Long-Press Picker */}
       <div
         className="relative flex-1 my-auto flex items-center justify-center overflow-hidden cursor-pointer"
+        onMouseDown={handleMediaPressStart}
+        onMouseUp={handleMediaPressEnd}
+        onMouseLeave={handleMediaPressEnd}
+        onTouchStart={handleMediaPressStart}
+        onTouchEnd={handleMediaPressEnd}
         onClick={handleMediaTap}
       >
-        {/* Left Tap Zone for Prev */}
+        {/* Double-tap Reaction Animated Burst */}
+        {doubleTapHeart && (
+          <div className="absolute inset-0 z-40 flex items-center justify-center pointer-events-none animate-in zoom-in-50 fade-in duration-200">
+            <div className="text-8xl filter drop-shadow-[0_10px_35px_rgba(0,0,0,0.85)] animate-bounce">
+              {doubleTapHeart.emoji}
+            </div>
+          </div>
+        )}
+        {/* Left Tap Zone for Prev Slide */}
         <div
           onClick={(e) => {
             e.stopPropagation();
             handlePrevSlide(e);
           }}
-          className="absolute left-0 top-0 bottom-0 w-1/3 z-20 cursor-pointer"
+          className="absolute left-0 top-0 bottom-0 w-1/4 z-20 cursor-pointer"
         />
 
-        {/* Right Tap Zone for Next */}
+        {/* Right Tap Zone for Next Slide */}
         <div
           onClick={(e) => {
             e.stopPropagation();
             handleNextSlide(e);
           }}
-          className="absolute right-0 top-0 bottom-0 w-1/3 z-20 cursor-pointer"
+          className="absolute right-0 top-0 bottom-0 w-1/4 z-20 cursor-pointer"
         />
+
+        {/* Dynamic Media Loading Spinner Circle */}
+        {isMediaLoading && (
+          <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-2 bg-black/40 backdrop-blur-xs rounded-2xl pointer-events-none">
+            <div className="relative flex items-center justify-center">
+              <div className="h-10 w-10 rounded-full border-2 border-white/20 border-t-white animate-spin" />
+              <Loader2 size={18} className="animate-spin text-white absolute" />
+            </div>
+            <span className="text-xs text-white/90 font-medium animate-pulse">
+              Загрузка сториз...
+            </span>
+          </div>
+        )}
 
         {/* Slide Media (Image or Video) */}
         {isVideoUrl(slides[activeSlideIndex]) ? (
-          <video
-            src={slides[activeSlideIndex]}
-            autoPlay
-            playsInline
-            loop
-            controls
-            className="max-h-[75vh] w-auto max-w-full rounded-2xl object-contain shadow-2xl transition-all duration-300"
-          />
+          <div className="relative max-h-[75vh] flex items-center justify-center">
+            <video
+              key={slides[activeSlideIndex]}
+              src={slides[activeSlideIndex]}
+              autoPlay
+              playsInline
+              loop
+              muted={isMuted}
+              onLoadedData={() => setIsMediaLoading(false)}
+              onCanPlay={() => setIsMediaLoading(false)}
+              onWaiting={() => setIsMediaLoading(true)}
+              className="max-h-[75vh] w-auto max-w-full rounded-2xl object-contain shadow-2xl transition-all duration-300"
+            />
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setIsMuted(!isMuted);
+                triggerHaptic('selection');
+              }}
+              className="absolute top-3 right-3 p-2 rounded-full bg-black/40 backdrop-blur-md text-white border border-white/20 hover:bg-black/60 transition shadow-lg z-30"
+              title={isMuted ? 'Включить звук' : 'Выключить звук'}
+            >
+              {isMuted ? <VolumeX size={16} /> : <Volume2 size={16} />}
+            </button>
+          </div>
         ) : (
           <img
             src={slides[activeSlideIndex]}
             alt={`Slide ${activeSlideIndex + 1}`}
-            className="max-h-[75vh] w-auto max-w-full rounded-2xl object-contain shadow-2xl transition-all duration-300"
+            onLoad={() => setIsMediaLoading(false)}
             onError={(e) => {
+              setIsMediaLoading(false);
               (e.target as HTMLImageElement).src =
                 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=800&auto=format&fit=crop';
             }}
+            className="max-h-[75vh] w-auto max-w-full rounded-2xl object-contain shadow-2xl transition-all duration-300"
           />
         )}
 
@@ -396,27 +594,52 @@ export const StoryViewer: React.FC<StoryViewerProps> = ({
         {currentStory.caption && (
           <div
             onClick={(e) => e.stopPropagation()}
-            className="absolute bottom-16 left-3.5 z-30 max-w-[68%] bg-black/20 dark:bg-black/30 backdrop-blur-md px-3 py-1.5 rounded-2xl border border-white/10 text-white text-[11px] font-medium leading-tight shadow-sm animate-fade-in"
+            className="absolute bottom-16 left-4 z-30 max-w-[70%] text-white text-[11px] font-semibold leading-tight drop-shadow-[0_1.5px_4px_rgba(0,0,0,0.95)] [text-shadow:_0_1px_4px_rgba(0,0,0,0.95)] animate-fade-in"
           >
             {currentStory.caption}
           </div>
         )}
 
-        {/* Comments Overlay Carousel Directly Over Story (No background box) */}
-        {(currentStory.comments || []).length > 0 && (
+        {/* Bottom-Left Backgroundless Carousel for Comments */}
+        {!currentStory.hideComments && curComment && (
           <div
             onClick={(e) => e.stopPropagation()}
-            className="absolute bottom-2 left-3 right-3 z-30 flex items-center gap-2 overflow-x-auto no-scrollbar py-0.5"
+            onTouchStart={handleCarouselTouchStart}
+            onTouchEnd={handleCarouselTouchEnd}
+            onWheel={(e) => {
+              if (e.deltaY > 0) handleCarouselNext();
+              else if (e.deltaY < 0) handleCarouselPrev();
+            }}
+            className="absolute bottom-3 left-4 z-30 flex flex-col items-start select-none cursor-pointer max-w-[85%]"
           >
-            {currentStory.comments?.map((c) => (
+            <div className="relative flex flex-col items-start gap-1">
+              {/* Stacked Carousel Layer Behind (Next comment peek) */}
+              {comments.length > 1 && nextComment && (
+                <div className="opacity-45 scale-95 origin-left pointer-events-none transition-all duration-300 flex items-center gap-1 text-[11px] text-white font-medium drop-shadow-[0_1px_3px_rgba(0,0,0,0.95)] [text-shadow:_0_1px_3px_rgba(0,0,0,0.95)]">
+                  <span className="font-bold opacity-80">{nextComment.userName}:</span>
+                  <span className="opacity-75">{formatSnippet(nextComment.text)}</span>
+                </div>
+              )}
+
+              {/* Foreground Active Comment (Truncated to 10 chars, No background box/bubble) */}
               <div
-                key={c.id}
-                className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/20 dark:bg-black/30 backdrop-blur-md border border-white/10 text-white shrink-0 text-[11px] max-w-[210px] shadow-sm"
+                onClick={() => {
+                  setShowCommentsModal(true);
+                  setIsPaused(true);
+                }}
+                className="flex items-center gap-1.5 text-xs text-white font-semibold drop-shadow-[0_1.5px_4px_rgba(0,0,0,0.95)] [text-shadow:_0_1.5px_4px_rgba(0,0,0,0.95)] hover:opacity-90 transition active:scale-98"
               >
-                <span className="font-bold text-sky-300 truncate max-w-[65px]">{c.userName}:</span>
-                <span className="text-white/95 truncate">{c.text}</span>
+                <div className="h-5 w-5 rounded-full bg-sky-500 text-white flex items-center justify-center text-[9px] font-bold shrink-0 shadow-sm">
+                  {curComment.userName?.substring(0, 1).toUpperCase()}
+                </div>
+                <span className="font-bold text-sky-300 drop-shadow-[0_1.5px_3px_rgba(0,0,0,0.95)]">
+                  {curComment.userName}:
+                </span>
+                <span className="text-white font-semibold drop-shadow-[0_1.5px_3px_rgba(0,0,0,0.95)]">
+                  {formatSnippet(curComment.text)}
+                </span>
               </div>
-            ))}
+            </div>
           </div>
         )}
 
@@ -433,35 +656,11 @@ export const StoryViewer: React.FC<StoryViewerProps> = ({
         </div>
       </div>
 
-      {/* Bottom Interactive Bar (Reaction Selector & Comment Input) */}
+      {/* Bottom Interactive Bar (Comment Input Only) */}
       <div
-        className="relative z-30 p-3 pb-5 bg-gradient-to-t from-black/80 via-black/40 to-transparent space-y-2.5"
+        className="relative z-30 p-3 pb-5 bg-gradient-to-t from-black/80 via-black/40 to-transparent space-y-2"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Compact Reaction Selector */}
-        {!currentStory.hideReactions && (
-          <div className="flex items-center justify-center gap-2 px-2">
-            {allowedEmojis.map((emoji) => {
-              const isSelected = selectedEmoji === emoji;
-              return (
-                <button
-                  key={emoji}
-                  onClick={() => handleAddReaction(emoji)}
-                  className={`h-9 w-9 rounded-full backdrop-blur-md flex items-center justify-center text-lg transition active:scale-125 hover:scale-110 shadow-md ${
-                    isSelected
-                      ? 'bg-sky-500/30 border-2 border-sky-400 ring-2 ring-sky-400/50 scale-105'
-                      : 'bg-white/10 hover:bg-white/20 border border-white/10'
-                  }`}
-                  title={isSelected ? 'Выбранная реакция (двойной тап по сториз)' : 'Предварительный выбор реакции'}
-                >
-                  {emoji}
-                </button>
-              );
-            })}
-          </div>
-        )}
-
-        {/* Comment input or disabled note */}
         <div className="flex items-center gap-2">
           {!currentStory.hideComments ? (
             <form onSubmit={handleSendComment} className="flex-1 flex items-center gap-2">
@@ -469,8 +668,16 @@ export const StoryViewer: React.FC<StoryViewerProps> = ({
                 type="text"
                 value={commentText}
                 onChange={(e) => setCommentText(e.target.value)}
+                onFocus={() => {
+                  setIsCommentInputFocused(true);
+                  setIsPaused(true);
+                }}
+                onBlur={() => {
+                  setIsCommentInputFocused(false);
+                  setIsPaused(false);
+                }}
                 placeholder="Отправить сообщение..."
-                className="flex-1 px-3.5 py-2 rounded-full bg-white/10 backdrop-blur-md border border-white/15 text-white text-xs placeholder:text-white/60 outline-none focus:ring-1 focus:ring-sky-400/50"
+                className="flex-1 px-4 py-2 rounded-full bg-white/10 backdrop-blur-md border border-white/15 text-white text-xs placeholder:text-white/60 outline-none focus:ring-1 focus:ring-sky-400/50"
               />
               <button
                 type="submit"
@@ -486,9 +693,12 @@ export const StoryViewer: React.FC<StoryViewerProps> = ({
             </div>
           )}
 
-          {/* View Comments Button */}
+          {/* View Comments Drawer Toggle */}
           <button
-            onClick={() => setShowCommentsModal(true)}
+            onClick={() => {
+              setShowCommentsModal(true);
+              setIsPaused(true);
+            }}
             className="relative h-8 px-3 rounded-full bg-white/10 hover:bg-white/20 backdrop-blur-md border border-white/15 text-white text-xs font-semibold flex items-center gap-1.5 transition shrink-0"
           >
             <MessageCircle size={14} />
@@ -497,77 +707,135 @@ export const StoryViewer: React.FC<StoryViewerProps> = ({
         </div>
       </div>
 
-      {/* Comments Drawer / Modal */}
-      {showCommentsModal && (
+      {/* Temporary Floating Reaction Picker (Opens on Long-Press & Auto-Pauses Story) */}
+      {showReactionPicker && !currentStory.hideReactions && (
         <div
-          className="fixed inset-0 z-50 bg-black/60 backdrop-blur-md flex flex-col justify-end animate-fade-in"
-          onClick={() => setShowCommentsModal(false)}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm animate-fade-in select-none"
+          onClick={() => {
+            setShowReactionPicker(false);
+            setIsPaused(false);
+          }}
         >
           <div
             onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-md mx-auto h-[60vh] rounded-t-3xl bg-slate-900/90 dark:bg-slate-900/95 backdrop-blur-2xl border-t border-slate-700/50 text-white flex flex-col p-4 animate-slide-up shadow-2xl"
+            className="p-3.5 rounded-3xl bg-slate-900/90 border border-slate-700/80 shadow-2xl backdrop-blur-2xl flex items-center gap-2.5 animate-scale-up"
           >
-            {/* Modal Header */}
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+            {allowedEmojis.map((emoji) => (
+              <button
+                key={emoji}
+                type="button"
+                onClick={() => {
+                  setShowReactionPicker(false);
+                  setIsPaused(false);
+                  handleAddReaction(emoji);
+                }}
+                className="h-11 w-11 rounded-2xl bg-white/10 hover:bg-sky-500/30 hover:scale-125 border border-white/15 text-2xl flex items-center justify-center transition active:scale-90"
+              >
+                {emoji}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Light-Theme Platform-Style Comments Drawer / Modal */}
+      {showCommentsModal && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-md flex flex-col justify-end animate-fade-in"
+          onClick={() => {
+            setShowCommentsModal(false);
+            setIsPaused(false);
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-md mx-auto h-[65vh] rounded-t-3xl bg-white dark:bg-slate-900 border-t border-slate-200 dark:border-slate-800 text-slate-800 dark:text-slate-100 flex flex-col p-4 animate-slide-up shadow-2xl select-none"
+          >
+            {/* Light-Theme Header */}
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
               <div className="flex items-center gap-2">
-                <MessageCircle size={18} className="text-sky-400" />
-                <h4 className="font-bold text-sm">Комментарии к истории</h4>
-                <span className="text-xs text-slate-400 font-normal">
+                <MessageCircle size={18} className="text-sky-500" />
+                <h4 className="font-bold text-sm text-slate-900 dark:text-white">Комментарии</h4>
+                <span className="text-xs text-slate-400 font-medium">
                   ({(currentStory.comments || []).length})
                 </span>
               </div>
               <button
-                onClick={() => setShowCommentsModal(false)}
-                className="h-7 w-7 rounded-full bg-slate-800 flex items-center justify-center text-slate-400 hover:text-white"
+                onClick={() => {
+                  setShowCommentsModal(false);
+                  setIsPaused(false);
+                }}
+                className="h-7 w-7 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-500 hover:text-slate-900 dark:hover:text-white transition"
               >
                 <X size={16} />
               </button>
             </div>
 
-            {/* Comments List */}
-            <div className="flex-1 overflow-y-auto no-scrollbar py-3 space-y-2.5">
+            {/* Platform-Style Chat Message Bubbles */}
+            <div className="flex-1 overflow-y-auto no-scrollbar py-3 space-y-3">
               {(currentStory.comments || []).length > 0 ? (
-                currentStory.comments?.map((c) => (
-                  <div key={c.id} className="flex gap-2.5 items-start bg-white/5 p-2.5 rounded-2xl border border-white/10">
-                    <div className="h-7 w-7 rounded-full bg-sky-500/20 text-sky-400 flex items-center justify-center text-xs font-bold shrink-0">
-                      {c.userName.substring(0, 2).toUpperCase()}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-bold text-slate-200">{c.userName}</span>
-                        <span className="text-[10px] text-slate-400">
-                          {new Date(c.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                        </span>
+                currentStory.comments?.map((c) => {
+                  const isMe = currentUser?.id && String(currentUser.id) === String(c.userId);
+                  return (
+                    <div
+                      key={c.id}
+                      className={`flex gap-2.5 items-end ${isMe ? 'flex-row-reverse' : 'flex-row'}`}
+                    >
+                      <div className="h-7 w-7 rounded-full bg-gradient-to-tr from-sky-400 to-blue-600 text-white flex items-center justify-center text-xs font-bold shrink-0 shadow-sm">
+                        {c.userName.substring(0, 2).toUpperCase()}
                       </div>
-                      <p className="text-xs text-slate-300 mt-0.5 break-words">{c.text}</p>
+                      <div
+                        className={`max-w-[78%] p-3 rounded-2xl shadow-sm text-xs ${
+                          isMe
+                            ? 'bg-sky-500 text-white rounded-br-xs'
+                            : 'bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-100 rounded-bl-xs border border-slate-200/60 dark:border-slate-700/60'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2 mb-1">
+                          <span className={`font-bold text-[11px] ${isMe ? 'text-sky-100' : 'text-sky-600 dark:text-sky-400'}`}>
+                            {c.userName}
+                          </span>
+                          <span className={`text-[9px] ${isMe ? 'text-sky-200' : 'text-slate-400'}`}>
+                            {new Date(c.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                          </span>
+                        </div>
+                        <p className="break-words leading-relaxed">{c.text}</p>
+                      </div>
                     </div>
-                  </div>
-                ))
+                  );
+                })
               ) : (
-                <div className="h-full flex flex-col items-center justify-center text-slate-400 space-y-1">
-                  <MessageCircle size={32} strokeWidth={1.5} />
-                  <p className="text-xs font-medium">Пока нет комментариев</p>
-                  <p className="text-[10px] text-slate-500">Напишите первый комментарий выше</p>
+                <div className="h-full flex flex-col items-center justify-center text-slate-400 space-y-2">
+                  <MessageCircle size={36} strokeWidth={1.5} className="text-slate-300 dark:text-slate-600" />
+                  <p className="text-xs font-semibold text-slate-500">Пока нет комментариев</p>
+                  <p className="text-[11px] text-slate-400">Напишите первый комментарий под этой историей</p>
                 </div>
               )}
             </div>
 
-            {/* Bottom Add Comment */}
+            {/* Light-Theme Drawer Input */}
             {!currentStory.hideComments && (
-              <form onSubmit={handleSendComment} className="pt-2 border-t border-slate-800 flex gap-2">
+              <form onSubmit={handleSendComment} className="pt-2.5 border-t border-slate-100 dark:border-slate-800 flex gap-2">
                 <input
                   type="text"
                   value={commentText}
                   onChange={(e) => setCommentText(e.target.value)}
-                  placeholder="Ваш комментарий..."
-                  className="flex-1 px-3.5 py-2 rounded-xl bg-slate-800 border border-slate-700 text-xs text-white outline-none focus:ring-1 focus:ring-sky-500"
+                  onFocus={() => {
+                    setIsCommentInputFocused(true);
+                    setIsPaused(true);
+                  }}
+                  onBlur={() => {
+                    setIsCommentInputFocused(false);
+                  }}
+                  placeholder="Написать комментарий..."
+                  className="flex-1 px-4 py-2.5 rounded-2xl bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs text-slate-900 dark:text-white outline-none focus:ring-2 focus:ring-sky-500 placeholder:text-slate-400"
                 />
                 <button
                   type="submit"
                   disabled={!commentText.trim()}
-                  className="px-4 py-2 rounded-xl bg-sky-500 disabled:opacity-50 text-white font-semibold text-xs transition"
+                  className="px-4 py-2.5 rounded-2xl bg-sky-500 hover:bg-sky-400 disabled:opacity-40 text-white font-semibold text-xs shadow-md transition"
                 >
-                  Отправить
+                  <Send size={15} />
                 </button>
               </form>
             )}
@@ -575,7 +843,41 @@ export const StoryViewer: React.FC<StoryViewerProps> = ({
         </div>
       )}
 
+      {/* Confirm Story Deletion Modal */}
+      {showConfirmDelete && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-md animate-fade-in"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="w-full max-w-xs rounded-3xl p-5 bg-slate-900 border border-slate-700/80 text-white shadow-2xl space-y-4 text-center select-none animate-scale-up">
+            <div className="h-12 w-12 mx-auto rounded-full bg-red-500/20 text-red-400 flex items-center justify-center border border-red-500/30">
+              <Trash2 size={24} />
+            </div>
+            <div>
+              <h4 className="text-sm font-bold">Удалить историю?</h4>
+              <p className="text-xs text-slate-400 mt-1">
+                История будет безвозвратно удалена для всех зрителей.
+              </p>
+            </div>
+            <div className="flex items-center gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setShowConfirmDelete(false)}
+                className="flex-1 py-2.5 rounded-2xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                onClick={handleDelete}
+                className="flex-1 py-2.5 rounded-2xl bg-red-600 hover:bg-red-500 text-white text-xs font-semibold shadow-md shadow-red-600/30 transition"
+              >
+                Удалить
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
-

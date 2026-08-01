@@ -70,7 +70,7 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
         setIsLocked(true);
         if (onLockRecording) onLockRecording();
       } else if (deltaX < -60) {
-        onCancel();
+        handleCancelVoice();
       } else {
         handleFinishAndSend();
       }
@@ -189,7 +189,13 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
         }
       }
       if (streamRef.current) {
-        streamRef.current.getTracks().forEach((t) => t.stop());
+        streamRef.current.getTracks().forEach((t) => {
+          try {
+            t.enabled = false;
+            t.stop();
+          } catch {}
+        });
+        streamRef.current = null;
       }
     };
   }, []);
@@ -200,14 +206,34 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
+  const handleStopStream = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => {
+        try {
+          t.enabled = false;
+          t.stop();
+        } catch {}
+      });
+      streamRef.current = null;
+    }
+  };
+
+  const handleCancelVoice = () => {
+    handleStopStream();
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      try {
+        mediaRecorderRef.current.stop();
+      } catch {}
+    }
+    onCancel();
+  };
+
   const handleFinishAndSend = () => {
     const dur = Math.max(secondsRef.current, 1);
     const recorder = mediaRecorderRef.current;
     if (recorder && recorder.state !== 'inactive') {
       recorder.onstop = () => {
-        if (streamRef.current) {
-          streamRef.current.getTracks().forEach((t) => t.stop());
-        }
+        handleStopStream();
         const mimeType = recorder.mimeType || 'audio/webm';
         const blob = new Blob(chunksRef.current, { type: mimeType });
         const mediaUrl = blob.size > 0 ? URL.createObjectURL(blob) : '';
@@ -215,6 +241,7 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
       };
       recorder.stop();
     } else {
+      handleStopStream();
       const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
       const mediaUrl =
         blob.size > 0
@@ -235,7 +262,7 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
       <div className="flex items-center gap-2 shrink-0">
         <button
           type="button"
-          onClick={onCancel}
+          onClick={handleCancelVoice}
           className="p-1.5 rounded-full hover:bg-red-50 dark:hover:bg-red-950/30 text-red-500 transition active:scale-95"
           title="Отменить запись"
         >

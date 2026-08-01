@@ -1,4 +1,6 @@
 import { User, Contact, Message, MessageReactionInfo, Transaction, NewsItem, NewsComment, ChannelGroup, ChannelGroupType, AppNotification, SystemAnnouncement, AdminReport, AuditLogItem, SystemStats, UserRole, Story, StoryReaction, StoryComment } from '../types';
+import { cacheService } from './cacheService';
+import { offlineOutbox } from './offlineOutbox';
 
 const TOKEN_KEY = 'orbit_jwt_token';
 
@@ -68,6 +70,9 @@ export const api = {
 
   async getCurrentUser(): Promise<User> {
     const res = await apiRequest<{ user: User }>('/api/auth/me');
+    if (res.user) {
+      cacheService.set('current_user', res.user);
+    }
     return res.user;
   },
 
@@ -94,7 +99,17 @@ export const api = {
 
   // Contacts & Search
   async getContacts(): Promise<Contact[]> {
-    return apiRequest<Contact[]>('/api/contacts');
+    try {
+      const res = await apiRequest<Contact[]>('/api/contacts');
+      if (Array.isArray(res)) {
+        cacheService.setCachedContacts(res);
+      }
+      return res;
+    } catch (e) {
+      const cached = cacheService.getCachedContacts();
+      if (cached) return cached;
+      throw e;
+    }
   },
 
   async searchUsers(query: string): Promise<Contact[]> {
@@ -153,7 +168,17 @@ export const api = {
 
   // Messages
   async getMessages(contactId: string, limit = 20): Promise<{ messages: Message[]; has_more: boolean }> {
-    return apiRequest<{ messages: Message[]; has_more: boolean }>(`/api/messages/${contactId}?limit=${limit}`);
+    try {
+      const res = await apiRequest<{ messages: Message[]; has_more: boolean }>(`/api/messages/${contactId}?limit=${limit}`);
+      if (res && Array.isArray(res.messages)) {
+        cacheService.setCachedMessages(contactId, res.messages);
+      }
+      return res;
+    } catch (e) {
+      const cached = cacheService.getCachedMessages(contactId);
+      if (cached) return { messages: cached, has_more: false };
+      throw e;
+    }
   },
 
   async getMessageHistory(contactId: string, beforeId: string, limit = 20): Promise<{ messages: Message[]; has_more: boolean }> {
@@ -163,10 +188,59 @@ export const api = {
   },
 
   async sendMessage(contactId: string, payload: { text?: string; mediaUrl?: string; mediaType?: 'image' | 'file' | 'audio' | 'video_circle' | 'sticker' | 'document'; amount?: number; tx?: boolean }): Promise<Message> {
-    return apiRequest<Message>(`/api/messages/${contactId}`, {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    });
+    if (!navigator.onLine) {
+      let type: any = 'chat_message';
+      if (payload.mediaType === 'audio') type = 'voice_note';
+      else if (payload.mediaType === 'video_circle') type = 'video_circle';
+
+      offlineOutbox.enqueue(type, payload.text || 'Медиа сообщение', { recipientId: contactId, ...payload });
+
+      const optimisticMsg: Message = {
+        id: 'msg_off_' + Date.now(),
+        from: 'me',
+        text: payload.text || '',
+        timestamp: Date.now(),
+        mediaUrl: payload.mediaUrl,
+        mediaType: payload.mediaType,
+        pending: true,
+        amount: payload.amount,
+        tx: payload.tx,
+      };
+
+      // Append to local cache
+      const cached = cacheService.getCachedMessages(contactId) || [];
+      cacheService.setCachedMessages(contactId, [...cached, optimisticMsg]);
+      return optimisticMsg;
+    }
+
+    try {
+      const res = await apiRequest<Message>(`/api/messages/${contactId}`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+      return res;
+    } catch (err: any) {
+      let type: any = 'chat_message';
+      if (payload.mediaType === 'audio') type = 'voice_note';
+      else if (payload.mediaType === 'video_circle') type = 'video_circle';
+
+      offlineOutbox.enqueue(type, payload.text || 'Медиа сообщение', { recipientId: contactId, ...payload });
+
+      const optimisticMsg: Message = {
+        id: 'msg_off_' + Date.now(),
+        from: 'me',
+        text: payload.text || '',
+        timestamp: Date.now(),
+        mediaUrl: payload.mediaUrl,
+        mediaType: payload.mediaType,
+        pending: true,
+        amount: payload.amount,
+        tx: payload.tx,
+      };
+      const cached = cacheService.getCachedMessages(contactId) || [];
+      cacheService.setCachedMessages(contactId, [...cached, optimisticMsg]);
+      return optimisticMsg;
+    }
   },
 
   async markMessagesRead(contactId: string): Promise<{ success: boolean }> {
@@ -224,7 +298,17 @@ export const api = {
 
   // News & Notifications
   async getNews(): Promise<NewsItem[]> {
-    return apiRequest<NewsItem[]>('/api/news');
+    try {
+      const res = await apiRequest<NewsItem[]>('/api/news');
+      if (Array.isArray(res)) {
+        cacheService.setCachedNews(res);
+      }
+      return res;
+    } catch (e) {
+      const cached = cacheService.getCachedNews();
+      if (cached) return cached;
+      throw e;
+    }
   },
 
   async getNotifications(): Promise<AppNotification[]> {
@@ -249,10 +333,14 @@ export const api = {
 
   // Profile Updates & Social
   async updateProfile(updates: Partial<User>): Promise<{ user: User }> {
-    return apiRequest<{ user: User }>('/api/users/profile', {
+    const res = await apiRequest<{ user: User }>('/api/users/profile', {
       method: 'PUT',
       body: JSON.stringify(updates),
     });
+    if (res && res.user) {
+      cacheService.set('current_user', res.user);
+    }
+    return res;
   },
 
   async followUser(targetUserId: string): Promise<{ success: boolean; message: string }> {
@@ -289,7 +377,17 @@ export const api = {
 
   // Stories
   async getStories(): Promise<Story[]> {
-    return apiRequest<Story[]>('/api/stories');
+    try {
+      const res = await apiRequest<Story[]>('/api/stories');
+      if (Array.isArray(res)) {
+        cacheService.setCachedStories(res);
+      }
+      return res;
+    } catch (e) {
+      const cached = cacheService.getCachedStories();
+      if (cached) return cached;
+      throw e;
+    }
   },
 
   async createStory(
@@ -303,18 +401,60 @@ export const api = {
       allowedReactions?: string[];
     }
   ): Promise<Story> {
-    return apiRequest<Story>('/api/stories', {
-      method: 'POST',
-      body: JSON.stringify({
-        mediaUrl,
-        caption,
-        slides: options?.slides,
-        audience: options?.audience,
-        hideComments: options?.hideComments,
-        hideReactions: options?.hideReactions,
-        allowedReactions: options?.allowedReactions,
-      }),
-    });
+    if (!navigator.onLine) {
+      offlineOutbox.enqueue('story', caption || 'История', { imageUrl: mediaUrl, caption, options });
+      const currentUser = cacheService.getSync<User>('current_user');
+      const optimisticStory: Story = {
+        id: 'story_off_' + Date.now(),
+        userId: currentUser ? currentUser.id : 'me',
+        userName: currentUser ? currentUser.username : 'Вы',
+        userAvatar: currentUser ? currentUser.avatarUrl : undefined,
+        mediaUrl: mediaUrl,
+        caption: caption || '',
+        timestamp: Date.now(),
+        slides: options?.slides || [mediaUrl],
+        reactions: [],
+        comments: [],
+        audience: options?.audience || 'everyone',
+      };
+      const cached = cacheService.getCachedStories() || [];
+      cacheService.setCachedStories([optimisticStory, ...cached]);
+      return optimisticStory;
+    }
+
+    try {
+      return await apiRequest<Story>('/api/stories', {
+        method: 'POST',
+        body: JSON.stringify({
+          mediaUrl,
+          caption,
+          slides: options?.slides,
+          audience: options?.audience,
+          hideComments: options?.hideComments,
+          hideReactions: options?.hideReactions,
+          allowedReactions: options?.allowedReactions,
+        }),
+      });
+    } catch (err: any) {
+      offlineOutbox.enqueue('story', caption || 'История', { imageUrl: mediaUrl, caption, options });
+      const currentUser = cacheService.getSync<User>('current_user');
+      const optimisticStory: Story = {
+        id: 'story_off_' + Date.now(),
+        userId: currentUser ? currentUser.id : 'me',
+        userName: currentUser ? currentUser.username : 'Вы',
+        userAvatar: currentUser ? currentUser.avatarUrl : undefined,
+        mediaUrl: mediaUrl,
+        caption: caption || '',
+        timestamp: Date.now(),
+        slides: options?.slides || [mediaUrl],
+        reactions: [],
+        comments: [],
+        audience: options?.audience || 'everyone',
+      };
+      const cached = cacheService.getCachedStories() || [];
+      cacheService.setCachedStories([optimisticStory, ...cached]);
+      return optimisticStory;
+    }
   },
 
   async updateStory(
@@ -361,17 +501,69 @@ export const api = {
   async createNews(
     title: string,
     content: string,
-    options?: { mediaUrl?: string; mediaType?: 'image' | 'video'; tag?: string; accent?: string }
+    options?: { mediaUrl?: string; mediaType?: 'image' | 'video'; tag?: string; accent?: string; summary?: string; category?: string; videoUrl?: string; isReel?: boolean }
   ): Promise<NewsItem> {
-    return apiRequest<NewsItem>('/api/news', {
-      method: 'POST',
-      body: JSON.stringify({ title, content, ...options }),
-    });
+    if (!navigator.onLine) {
+      offlineOutbox.enqueue(options?.isReel ? 'reel' : 'news_post', title, { title, content, ...options });
+      const currentUser = cacheService.getSync<User>('current_user');
+      const optimisticNews: NewsItem = {
+        id: 'news_off_' + Date.now(),
+        title,
+        content,
+        mediaUrl: options?.mediaUrl,
+        mediaType: options?.mediaType || 'image',
+        tag: options?.tag || 'Новости',
+        timestamp: new Date().toISOString(),
+        accent: options?.accent || 'blue',
+        authorName: currentUser ? currentUser.username : 'Вы',
+        authorAvatar: currentUser ? currentUser.avatarUrl : undefined,
+        likesCount: 0,
+        userLiked: false,
+        commentsCount: 0,
+        comments: [],
+      };
+      const cached = cacheService.getCachedNews() || [];
+      cacheService.setCachedNews([optimisticNews, ...cached]);
+      return optimisticNews;
+    }
+
+    try {
+      return await apiRequest<NewsItem>('/api/news', {
+        method: 'POST',
+        body: JSON.stringify({ title, content, ...options }),
+      });
+    } catch (err: any) {
+      offlineOutbox.enqueue(options?.isReel ? 'reel' : 'news_post', title, { title, content, ...options });
+      const currentUser = cacheService.getSync<User>('current_user');
+      const optimisticNews: NewsItem = {
+        id: 'news_off_' + Date.now(),
+        title,
+        content,
+        mediaUrl: options?.mediaUrl,
+        mediaType: options?.mediaType || 'image',
+        tag: options?.tag || 'Новости',
+        timestamp: new Date().toISOString(),
+        accent: options?.accent || 'blue',
+        authorName: currentUser ? currentUser.username : 'Вы',
+        authorAvatar: currentUser ? currentUser.avatarUrl : undefined,
+        likesCount: 0,
+        userLiked: false,
+        commentsCount: 0,
+        comments: [],
+      };
+      const cached = cacheService.getCachedNews() || [];
+      cacheService.setCachedNews([optimisticNews, ...cached]);
+      return optimisticNews;
+    }
+  },
+
+  async createNewsItem(payload: any): Promise<NewsItem> {
+    return this.createNews(payload.title, payload.content || payload.summary || '', payload);
   },
 
   async updateNews(
     id: string,
-    updates: { title?: string; content?: string; mediaUrl?: string }
+    updates: { title?: string; content?: string; mediaUrl?: string; tag?: string; mediaType?: 'image' | 'video' }
   ): Promise<{ success: boolean; news: NewsItem }> {
     return apiRequest<{ success: boolean; news: NewsItem }>(`/api/news/${id}`, {
       method: 'PUT',
@@ -395,6 +587,13 @@ export const api = {
     return apiRequest<{ success: boolean; comment: NewsComment }>(`/api/news/${id}/comment`, {
       method: 'POST',
       body: JSON.stringify({ text }),
+    });
+  },
+
+  async reportNews(id: string, reason?: string, comment?: string): Promise<{ success: boolean; message: string }> {
+    return apiRequest<{ success: boolean; message: string }>(`/api/news/${id}/report`, {
+      method: 'POST',
+      body: JSON.stringify({ reason, comment }),
     });
   },
 
@@ -426,6 +625,44 @@ export const api = {
   async leaveChannelGroup(id: string): Promise<{ success: boolean }> {
     return apiRequest<{ success: boolean }>(`/api/channels-groups/${id}/leave`, {
       method: 'POST',
+    });
+  },
+
+  async getChannelGroupDetails(id: string): Promise<ChannelGroup & { members: any[] }> {
+    return apiRequest<ChannelGroup & { members: any[] }>(`/api/channels-groups/${id}`);
+  },
+
+  async updateChannelGroup(id: string, updates: Partial<ChannelGroup>): Promise<{ success: boolean; channelGroup: ChannelGroup }> {
+    return apiRequest<{ success: boolean; channelGroup: ChannelGroup }>(`/api/channels-groups/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(updates),
+    });
+  },
+
+  async deleteChannelGroup(id: string): Promise<{ success: boolean; message: string }> {
+    return apiRequest<{ success: boolean; message: string }>(`/api/channels-groups/${id}`, {
+      method: 'DELETE',
+    });
+  },
+
+  async toggleChannelGroupAdmin(id: string, targetUserId: string): Promise<{ success: boolean; channelGroup: ChannelGroup }> {
+    return apiRequest<{ success: boolean; channelGroup: ChannelGroup }>(`/api/channels-groups/${id}/toggle-admin`, {
+      method: 'POST',
+      body: JSON.stringify({ targetUserId }),
+    });
+  },
+
+  async toggleChannelGroupModerator(id: string, targetUserId: string): Promise<{ success: boolean; channelGroup: ChannelGroup }> {
+    return apiRequest<{ success: boolean; channelGroup: ChannelGroup }>(`/api/channels-groups/${id}/toggle-moderator`, {
+      method: 'POST',
+      body: JSON.stringify({ targetUserId }),
+    });
+  },
+
+  async kickChannelGroupMember(id: string, targetUserId: string): Promise<{ success: boolean; channelGroup: ChannelGroup }> {
+    return apiRequest<{ success: boolean; channelGroup: ChannelGroup }>(`/api/channels-groups/${id}/kick`, {
+      method: 'POST',
+      body: JSON.stringify({ targetUserId }),
     });
   },
 

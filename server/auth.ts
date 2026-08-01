@@ -11,6 +11,8 @@ export interface AuthenticatedRequest extends Request {
     email: string;
     username: string;
     handle: string;
+    firstName?: string;
+    lastName?: string;
   };
 }
 
@@ -194,7 +196,7 @@ export function registerHandler(req: Request, res: Response): void {
       avatarColor,
       initials,
       handle: formattedHandle,
-      balance: 1000.00, // Welcome bonus ORB
+      balance: 0.00, // Regular users start strictly with 0.00 ORB
       createdAt: new Date().toISOString()
     };
 

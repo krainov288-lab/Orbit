@@ -88,6 +88,11 @@ export interface Contact {
   inviteLink?: string;
   isAdmin?: boolean;
   description?: string;
+  allowCalls?: boolean;
+  mutedFeedNotifications?: boolean;
+  creatorId?: string;
+  adminIds?: string[];
+  moderatorIds?: string[];
 }
 
 export interface MessageReactionInfo {
@@ -137,6 +142,7 @@ export interface NewsComment {
 export interface NewsItem {
   id: string;
   userId?: string;
+  channelId?: string;
   authorName?: string;
   authorHandle?: string;
   authorAvatar?: string;
@@ -154,6 +160,8 @@ export interface NewsItem {
   sharesCount?: number;
 }
 
+export type CallType = 'voice' | 'video' | 'group_conference' | 'channel_stream';
+
 export type ChannelGroupType = 'public_channel' | 'private_channel' | 'public_group' | 'private_group' | 'closed_group';
 
 export interface ChannelGroup {
@@ -166,9 +174,13 @@ export interface ChannelGroup {
   avatarColor: string;
   creatorId: string;
   adminIds: string[];
+  moderatorIds?: string[];
   memberIds: string[];
   createdAt: number;
   inviteLink?: string;
+  allowCalls?: boolean;
+  slowMode?: number;
+  signPosts?: boolean;
 }
 
 export interface AppNotification {

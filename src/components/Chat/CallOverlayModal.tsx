@@ -62,12 +62,37 @@ export const CallOverlayModal: React.FC<CallOverlayModalProps> = ({
     return () => clearInterval(interval);
   }, [isOpen, callType]);
 
+  const activeStreamRef = useRef<MediaStream | null>(null);
+
+  const stopTracks = () => {
+    if (activeStreamRef.current) {
+      activeStreamRef.current.getTracks().forEach((track) => {
+        try {
+          track.enabled = false;
+          track.stop();
+        } catch {}
+      });
+      activeStreamRef.current = null;
+    }
+    if (localVideoRef.current && localVideoRef.current.srcObject) {
+      const stream = localVideoRef.current.srcObject as MediaStream;
+      stream.getTracks().forEach((track) => {
+        try {
+          track.enabled = false;
+          track.stop();
+        } catch {}
+      });
+      localVideoRef.current.srcObject = null;
+    }
+  };
+
   // Request camera stream if video call or conference
   useEffect(() => {
     if (isOpen && (callType === 'video' || callType === 'group_conference') && !isVideoOff) {
       navigator.mediaDevices
         ?.getUserMedia({ video: true, audio: true })
         .then((stream) => {
+          activeStreamRef.current = stream;
           if (localVideoRef.current) {
             localVideoRef.current.srcObject = stream;
           }
@@ -75,15 +100,19 @@ export const CallOverlayModal: React.FC<CallOverlayModalProps> = ({
         .catch(() => {
           // Camera permission or fallback
         });
+    } else if (isVideoOff) {
+      stopTracks();
     }
 
     return () => {
-      if (localVideoRef.current && localVideoRef.current.srcObject) {
-        const stream = localVideoRef.current.srcObject as MediaStream;
-        stream.getTracks().forEach((t) => t.stop());
-      }
+      stopTracks();
     };
   }, [isOpen, callType, isVideoOff]);
+
+  const handleEndCall = () => {
+    stopTracks();
+    onClose();
+  };
 
   if (!isOpen) return null;
 
@@ -293,7 +322,7 @@ export const CallOverlayModal: React.FC<CallOverlayModalProps> = ({
 
           {/* Red End Call Button */}
           <button
-            onClick={onClose}
+            onClick={handleEndCall}
             className="h-12 w-14 rounded-2xl bg-red-600 hover:bg-red-500 text-white flex items-center justify-center shadow-lg shadow-red-600/30 active:scale-90 transition ml-2"
             title="Завершить вызов"
           >

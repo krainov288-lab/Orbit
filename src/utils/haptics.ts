@@ -1,39 +1,78 @@
-/**
- * Triggers haptic feedback using Web Vibration API if supported by the browser/device.
- */
-export type HapticPattern = 'light' | 'medium' | 'heavy' | 'selection' | 'success' | 'error' | number;
+// Vibration API utility for subtle tactile feedback across key user interactions
 
-export const triggerHaptic = (pattern: HapticPattern = 'selection') => {
-  if (typeof window !== 'undefined' && 'vibrate' in navigator && typeof navigator.vibrate === 'function') {
-    try {
-      if (typeof pattern === 'number') {
-        navigator.vibrate(pattern);
-      } else {
-        switch (pattern) {
-          case 'selection':
-            navigator.vibrate(10); // Crisp light pulse for tab selection
-            break;
-          case 'light':
-            navigator.vibrate(15);
-            break;
-          case 'medium':
-            navigator.vibrate(35);
-            break;
-          case 'heavy':
-            navigator.vibrate(60);
-            break;
-          case 'success':
-            navigator.vibrate([20, 40, 20]); // Double-tap pulse for message sent
-            break;
-          case 'error':
-            navigator.vibrate([50, 50, 50, 50]);
-            break;
-          default:
-            navigator.vibrate(10);
-        }
-      }
-    } catch {
-      // Safe fallback if vibration is blocked or unsupported
+export const haptics = {
+  /**
+   * Light tactile tap for standard button clicks, tab switches, toggles
+   */
+  tap: () => {
+    if (typeof window !== 'undefined' && 'vibrate' in navigator) {
+      try {
+        navigator.vibrate(12);
+      } catch {}
     }
-  }
+  },
+
+  /**
+   * Selection or item tap
+   */
+  selection: () => {
+    if (typeof window !== 'undefined' && 'vibrate' in navigator) {
+      try {
+        navigator.vibrate(20);
+      } catch {}
+    }
+  },
+
+  /**
+   * Medium vibration for key actions like sending messages, posting stories/news/reels
+   */
+  medium: () => {
+    if (typeof window !== 'undefined' && 'vibrate' in navigator) {
+      try {
+        navigator.vibrate(30);
+      } catch {}
+    }
+  },
+
+  /**
+   * Success vibration pattern (double pulse) for completed uploads or saved items
+   */
+  success: () => {
+    if (typeof window !== 'undefined' && 'vibrate' in navigator) {
+      try {
+        navigator.vibrate([15, 40, 25]);
+      } catch {}
+    }
+  },
+
+  /**
+   * Notification vibration pattern for incoming toasts or alerts
+   */
+  notification: () => {
+    if (typeof window !== 'undefined' && 'vibrate' in navigator) {
+      try {
+        navigator.vibrate([30, 50, 30, 50, 20]);
+      } catch {}
+    }
+  },
+
+  /**
+   * Error pattern
+   */
+  error: () => {
+    if (typeof window !== 'undefined' && 'vibrate' in navigator) {
+      try {
+        navigator.vibrate([50, 30, 50]);
+      } catch {}
+    }
+  },
 };
+
+export function triggerHaptic(type: 'tap' | 'selection' | 'medium' | 'success' | 'notification' | 'error' | 'impactMedium' | 'light' = 'tap') {
+  if (type === 'selection' || type === 'light') haptics.selection();
+  else if (type === 'medium' || type === 'impactMedium') haptics.medium();
+  else if (type === 'success') haptics.success();
+  else if (type === 'notification') haptics.notification();
+  else if (type === 'error') haptics.error();
+  else haptics.tap();
+}

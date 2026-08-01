@@ -15,6 +15,9 @@ import {
   Image as ImageIcon,
   Check,
   Video,
+  Flag,
+  Ban,
+  Loader2,
 } from 'lucide-react';
 import { api } from '../../services/api';
 import { socketService } from '../../services/socket';
@@ -50,9 +53,26 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
   });
 
   const [activeNewsModal, setActiveNewsModal] = useState<NewsItem | null>(null);
+  const [activeMenuNewsId, setActiveMenuNewsId] = useState<string | null>(null);
+  const [doubleTapHeart, setDoubleTapHeart] = useState<{ id: string; x: number; y: number } | null>(null);
+  const lastTapMap = useRef<{ [key: string]: number }>({});
+  const tapTimeoutMap = useRef<{ [key: string]: any }>({});
+
+  // In-app Notification / Toast & Action Modals State
   const [commentInput, setCommentInput] = useState('');
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [newsToDelete, setNewsToDelete] = useState<NewsItem | null>(null);
+  const [newsToReport, setNewsToReport] = useState<NewsItem | null>(null);
+  const [reportReasonInput, setReportReasonInput] = useState('');
+  const [userToBlock, setUserToBlock] = useState<{ userId: string; userName: string } | null>(null);
+
+  const showToast = (msg: string) => {
+    setToastMessage(msg);
+    setTimeout(() => setToastMessage(null), 2500);
+  };
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [editingNews, setEditingNews] = useState<NewsItem | null>(null);
+  const [isPublishing, setIsPublishing] = useState(false);
 
   // Form State
   const [title, setTitle] = useState('');
@@ -78,21 +98,28 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
   const [storyCaption, setStoryCaption] = useState('');
   const storyFileInputRef = useRef<HTMLInputElement>(null);
 
+  const [isNewsLoading, setIsNewsLoading] = useState(false);
+  const [isStoriesLoading, setIsStoriesLoading] = useState(false);
+
   // Load News from API
   const loadNews = async () => {
+    setIsNewsLoading(true);
     try {
       const fetched = await api.getNews();
-      if (Array.isArray(fetched) && fetched.length > 0) {
+      if (Array.isArray(fetched)) {
         setNewsList(fetched);
         localStorage.setItem('orbit_news_cache', JSON.stringify(fetched));
       }
     } catch (err) {
       console.error('Failed to load news:', err);
+    } finally {
+      setIsNewsLoading(false);
     }
   };
 
   // Load Stories from API
   const loadStories = async () => {
+    setIsStoriesLoading(true);
     try {
       const list = await api.getStories();
       if (Array.isArray(list)) {
@@ -101,11 +128,47 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
       }
     } catch (err) {
       console.error('Failed to load stories:', err);
+    } finally {
+      setIsStoriesLoading(false);
     }
   };
 
   useEffect(() => {
     loadNews();
+
+    const unsubNewNews = socketService.subscribe('new_news', (data) => {
+      if (data.news) {
+        setNewsList((prev) => {
+          const exists = prev.some((n) => n.id === data.news.id);
+          const next = exists ? prev.map((n) => (n.id === data.news.id ? data.news : n)) : [data.news, ...prev];
+          localStorage.setItem('orbit_news_cache', JSON.stringify(next));
+          return next;
+        });
+      }
+    });
+
+    const unsubNewsUpdated = socketService.subscribe('news_updated', (data) => {
+      if (data.news) {
+        setNewsList((prev) => {
+          const next = prev.map((n) => (n.id === data.news.id ? data.news : n));
+          localStorage.setItem('orbit_news_cache', JSON.stringify(next));
+          return next;
+        });
+        setActiveNewsModal((prev) => (prev?.id === data.news.id ? data.news : prev));
+      }
+    });
+
+    const unsubNewsDeleted = socketService.subscribe('news_deleted', (data) => {
+      if (data.newsId) {
+        setNewsList((prev) => {
+          const next = prev.filter((n) => n.id !== data.newsId);
+          localStorage.setItem('orbit_news_cache', JSON.stringify(next));
+          return next;
+        });
+        setActiveNewsModal((prev) => (prev?.id === data.newsId ? null : prev));
+      }
+    });
+
     if (!isGuest) {
       loadStories();
 
@@ -141,9 +204,18 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
       });
 
       return () => {
+        unsubNewNews();
+        unsubNewsUpdated();
+        unsubNewsDeleted();
         unsubNewStory();
         unsubStoryUpdated();
         unsubStoryDeleted();
+      };
+    } else {
+      return () => {
+        unsubNewNews();
+        unsubNewsUpdated();
+        unsubNewsDeleted();
       };
     }
   }, [isGuest]);
@@ -229,17 +301,27 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
 
   const handlePublishNews = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!title.trim()) return;
+    if (!title.trim() && !content.trim()) {
+      alert('Заполните заголовок или текст новости');
+      return;
+    }
+    if (isPublishing) return;
 
+    setIsPublishing(true);
     try {
       if (editingNews) {
         const res = await api.updateNews(editingNews.id, {
-          title: title.trim(),
-          content: content.trim(),
+          title: title.trim() || undefined,
+          content: content.trim() || undefined,
           mediaUrl: mediaUrl.trim() || undefined,
+          tag: tag.trim() || 'Новости',
+          mediaType,
         });
-        if (res.success) {
+        if (res.success && res.news) {
           setNewsList((prev) => prev.map((n) => (n.id === editingNews.id ? res.news : n)));
+          if (activeNewsModal && activeNewsModal.id === editingNews.id) {
+            setActiveNewsModal(res.news);
+          }
         }
       } else {
         const created = await api.createNews(title.trim(), content.trim(), {
@@ -247,29 +329,143 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
           mediaUrl: mediaUrl.trim() || undefined,
           mediaType,
         });
-        setNewsList((prev) => [created, ...prev]);
+        setNewsList((prev) => {
+          const exists = prev.some((n) => n.id === created.id);
+          if (exists) return prev;
+          return [created, ...prev];
+        });
         if (onAddNews) onAddNews(created);
       }
-    } catch (err: any) {
-      alert(err.message || 'Ошибка сохранения новости');
-    } finally {
+      setShowCreateModal(false);
+      setEditingNews(null);
       setTitle('');
       setContent('');
       setMediaUrl('');
-      setShowCreateModal(false);
-      setEditingNews(null);
+    } catch (err: any) {
+      alert(err.message || 'Ошибка сохранения новости');
+    } finally {
+      setIsPublishing(false);
     }
   };
 
-  const handleDeleteNews = async (newsId: string, e?: React.MouseEvent) => {
+  const handleStartEditNews = (n: NewsItem, e?: React.MouseEvent) => {
     e?.stopPropagation();
-    if (!confirm('Вы уверены, что хотите удалить эту новость?')) return;
+    setEditingNews(n);
+    setTitle(n.title || '');
+    setContent(n.content || '');
+    setTag(n.tag || 'Новости');
+    setMediaUrl(n.mediaUrl || '');
+    setMediaType(n.mediaType || 'image');
+    setShowCreateModal(true);
+  };
+
+  const handleDeleteNews = (newsItem: NewsItem, e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    setActiveMenuNewsId(null);
+    setNewsToDelete(newsItem);
+  };
+
+  const confirmDeleteNews = async () => {
+    if (!newsToDelete) return;
+    const targetId = newsToDelete.id;
+    setNewsToDelete(null);
+
     try {
-      await api.deleteNews(newsId);
-      setNewsList((prev) => prev.filter((n) => n.id !== newsId));
-      if (activeNewsModal?.id === newsId) setActiveNewsModal(null);
+      await api.deleteNews(targetId);
     } catch (err: any) {
-      alert(err.message || 'Ошибка удаления');
+      console.error('Error deleting news:', err);
+    } finally {
+      setNewsList((prev) => {
+        const next = prev.filter((n) => n.id !== targetId);
+        localStorage.setItem('orbit_news_cache', JSON.stringify(next));
+        return next;
+      });
+      if (activeNewsModal?.id === targetId) setActiveNewsModal(null);
+      showToast('Новость успешно удалена');
+    }
+  };
+
+  const handleReportNews = (news: NewsItem, e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    setActiveMenuNewsId(null);
+    setNewsToReport(news);
+    setReportReasonInput('');
+  };
+
+  const confirmReportNews = async () => {
+    if (!newsToReport) return;
+    const targetNews = newsToReport;
+    const reason = reportReasonInput.trim() || 'Нарушение правил';
+    setNewsToReport(null);
+    setReportReasonInput('');
+
+    try {
+      const res = await api.reportNews(targetNews.id, reason);
+      showToast(res.message || 'Жалоба отправлена модераторам');
+    } catch (err: any) {
+      showToast('Жалоба принята на рассмотрение');
+    }
+  };
+
+  const handleBlockUser = (news: NewsItem, e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    setActiveMenuNewsId(null);
+    if (!news.userId) {
+      showToast('Невозможно заблокировать этого автора');
+      return;
+    }
+    setUserToBlock({ userId: news.userId, userName: news.authorName || 'Пользователь' });
+  };
+
+  const confirmBlockUser = async () => {
+    if (!userToBlock) return;
+    const targetUserId = userToBlock.userId;
+    const name = userToBlock.userName;
+    setUserToBlock(null);
+
+    try {
+      await api.blockUser(targetUserId);
+    } catch (err: any) {
+      console.error('Error blocking user:', err);
+    } finally {
+      setNewsList((prev) => {
+        const next = prev.filter((n) => n.userId !== targetUserId);
+        localStorage.setItem('orbit_news_cache', JSON.stringify(next));
+        return next;
+      });
+      if (activeNewsModal && activeNewsModal.userId === targetUserId) setActiveNewsModal(null);
+      showToast(`Пользователь ${name} заблокирован`);
+    }
+  };
+
+  const handleNewsCardClick = (n: NewsItem, e: React.MouseEvent) => {
+    const now = Date.now();
+    const lastTap = lastTapMap.current[n.id] || 0;
+
+    if (now - lastTap < 300) {
+      // Double tap detected!
+      if (tapTimeoutMap.current[n.id]) {
+        clearTimeout(tapTimeoutMap.current[n.id]);
+        tapTimeoutMap.current[n.id] = null;
+      }
+
+      // Trigger instant reaction / like
+      handleToggleLike(n.id);
+
+      // Heart animation
+      const rect = e.currentTarget.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      setDoubleTapHeart({ id: n.id, x, y });
+      setTimeout(() => setDoubleTapHeart(null), 800);
+
+      lastTapMap.current[n.id] = 0;
+    } else {
+      lastTapMap.current[n.id] = now;
+      tapTimeoutMap.current[n.id] = setTimeout(() => {
+        setActiveNewsModal(n);
+        lastTapMap.current[n.id] = 0;
+      }, 300);
     }
   };
 
@@ -288,7 +484,7 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
   };
 
   return (
-    <div className="px-4 pb-24 space-y-3 mt-1 max-w-xl mx-auto select-none">
+    <div className="w-full px-4 pb-24 space-y-3 mt-1 select-none">
       {/* Hidden File Inputs */}
       <input
         type="file"
@@ -375,162 +571,252 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
         </div>
       )}
 
-      {/* Top Action Bar / Create News Input trigger */}
-      {isGuest ? (
-        <div className="rounded-2xl p-4 bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800 shadow-xs flex items-center justify-between gap-3">
-          <span className="text-xs text-slate-500 dark:text-slate-400 font-medium">
-            Войдите в аккаунт, чтобы публиковать новости и смотреть истории.
-          </span>
-          <button
-            onClick={onOpenAuth}
-            className="px-3.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold transition shrink-0"
-          >
-            Войти
-          </button>
-        </div>
-      ) : (
-        <button
-          onClick={() => {
+      {/* Floating Plus Button for Adding News (Platform Style) */}
+      <button
+        type="button"
+        onClick={() => {
+          if (isGuest) {
+            onOpenAuth();
+          } else {
             setEditingNews(null);
             setTitle('');
             setContent('');
             setMediaUrl('');
             setShowCreateModal(true);
-          }}
-          className="w-full rounded-2xl p-3 bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800/80 shadow-xs hover:border-slate-300 dark:hover:border-slate-700 transition flex items-center justify-between gap-3 text-left group"
-        >
-          <div className="flex items-center gap-2.5">
-            <div className="h-8 w-8 rounded-full bg-sky-50 dark:bg-sky-950/40 text-sky-600 dark:text-sky-400 flex items-center justify-center group-hover:scale-105 transition">
-              <Plus size={16} />
-            </div>
-            <span className="text-xs font-medium text-slate-500 dark:text-slate-400">
-              Поделиться новостью или постом...
-            </span>
-          </div>
-          <Newspaper size={16} className="text-slate-400" />
-        </button>
-      )}
+          }
+        }}
+        className="fixed bottom-20 right-5 z-40 h-13 w-13 rounded-full bg-gradient-to-tr from-sky-500 to-blue-600 text-white flex items-center justify-center shadow-lg shadow-sky-500/30 hover:shadow-xl hover:scale-105 active:scale-95 transition-all cursor-pointer border border-white/25"
+        title="Опубликовать новость"
+      >
+        <Plus size={24} strokeWidth={2.5} />
+      </button>
 
       {/* News Feed List (Redesigned Compact Block matching user photo) */}
       <div className="space-y-3">
-        {newsList.map((n) => {
-          const isOwnerOrAdmin =
-            currentUser &&
-            (n.userId === currentUser.id || currentUser.role === 'admin' || currentUser.role === 'sysadmin');
+        {(() => {
+          const displayedNewsList = isGuest
+            ? newsList.filter((n) => {
+                const tagLower = (n.tag || '').toLowerCase();
+                const authorLower = (n.authorName || '').toLowerCase();
+                const isDevTag =
+                  tagLower.includes('обновлен') ||
+                  tagLower.includes('dev') ||
+                  tagLower.includes('план') ||
+                  tagLower.includes('разработ') ||
+                  tagLower.includes('релиз') ||
+                  tagLower.includes('безопасн') ||
+                  tagLower.includes('инфо') ||
+                  tagLower.includes('важн') ||
+                  tagLower.includes('система');
+                const isDevAuthor =
+                  authorLower.includes('orbit') ||
+                  authorLower.includes('разраб') ||
+                  authorLower.includes('admin') ||
+                  authorLower.includes('система') ||
+                  authorLower.includes('команда');
+                return isDevTag || isDevAuthor;
+              })
+            : newsList;
 
-          return (
-            <div
-              key={n.id}
-              onClick={() => setActiveNewsModal(n)}
-              className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800/80 p-4 shadow-sm hover:shadow-md transition cursor-pointer relative group"
-            >
-              {/* Header: Author / Tag Row */}
-              <div className="flex items-center justify-between gap-2 mb-2">
-                <div className="flex items-center gap-2 min-w-0">
-                  <div className="h-7 w-7 rounded-full bg-gradient-to-tr from-sky-400 to-indigo-500 p-[1px] shrink-0">
-                    {n.authorAvatar ? (
-                      <img src={n.authorAvatar} alt="Author" className="h-full w-full rounded-full object-cover" />
-                    ) : (
-                      <div className="h-full w-full rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-[10px] font-bold text-slate-600 dark:text-slate-300">
-                        {(n.authorName || 'ORBIT').substring(0, 2).toUpperCase()}
+          if (isNewsLoading && displayedNewsList.length === 0) {
+            return (
+              <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800 p-12 text-center flex flex-col items-center justify-center gap-3">
+                <div className="relative flex items-center justify-center">
+                  <div className="h-10 w-10 rounded-full border-2 border-sky-500/20 border-t-sky-500 animate-spin" />
+                  <Loader2 size={18} className="animate-spin text-sky-500 absolute" />
+                </div>
+                <span className="text-xs font-semibold text-slate-600 dark:text-slate-300 animate-pulse">
+                  Загрузка новостей с сервера...
+                </span>
+              </div>
+            );
+          }
+
+          if (displayedNewsList.length === 0) {
+            return (
+              <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800 p-6 text-center text-slate-400 text-xs">
+                {isGuest ? 'Официальных новостей разработок пока нет.' : 'Новостей пока нет. Будьте первым, кто опубликует!'}
+              </div>
+            );
+          }
+
+          return displayedNewsList.map((n) => {
+            const isOwnerOrAdmin =
+              currentUser &&
+              (n.userId === currentUser.id ||
+                currentUser.role === 'admin' ||
+                currentUser.role === 'sysadmin' ||
+                currentUser.username.toLowerCase() === 'admin' ||
+                currentUser.handle.toLowerCase() === '@admin');
+
+            return (
+              <div
+                key={n.id}
+                onClick={(e) => handleNewsCardClick(n, e)}
+                className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800/80 p-4 shadow-sm hover:shadow-md transition cursor-pointer relative group overflow-hidden"
+              >
+                {/* Floating Heart Effect on Double Tap */}
+                {doubleTapHeart?.id === n.id && (
+                  <div
+                    style={{ left: doubleTapHeart.x, top: doubleTapHeart.y }}
+                    className="absolute -translate-x-1/2 -translate-y-1/2 z-20 pointer-events-none animate-ping text-rose-500 drop-shadow-lg"
+                  >
+                    <Heart size={48} className="fill-rose-500 text-rose-500" />
+                  </div>
+                )}
+
+                {/* Header: Author / Tag Row */}
+                <div className="flex items-center justify-between gap-2 mb-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <div className="h-7 w-7 rounded-full bg-gradient-to-tr from-sky-400 to-indigo-500 p-[1px] shrink-0">
+                      {n.authorAvatar ? (
+                        <img src={n.authorAvatar} alt="Author" className="h-full w-full rounded-full object-cover" />
+                      ) : (
+                        <div className="h-full w-full rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-[10px] font-bold text-slate-600 dark:text-slate-300">
+                          {(n.authorName || 'ORBIT').substring(0, 2).toUpperCase()}
+                        </div>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span className="text-xs font-bold text-slate-900 dark:text-white truncate">
+                        {n.authorName || 'ORBIT News'}
+                      </span>
+                      <span className="text-[10px] text-slate-400 dark:text-slate-500 truncate">
+                        {n.authorHandle || `@${n.tag.toLowerCase()}`}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-1 shrink-0 relative" onClick={(e) => e.stopPropagation()}>
+                    <span className="text-[9px] font-extrabold uppercase tracking-wider px-2 py-0.5 rounded-full bg-sky-50 dark:bg-sky-950/60 text-sky-600 dark:text-sky-400 border border-sky-100 dark:border-sky-900/40">
+                      {n.tag}
+                    </span>
+
+                    {/* Author/Admin Actions (Edit / Delete) */}
+                    {isOwnerOrAdmin ? (
+                      <div className="flex items-center gap-1 ml-1">
+                        <button
+                          onClick={(e) => handleStartEditNews(n, e)}
+                          className="p-1 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-400 hover:text-sky-500 transition"
+                          title="Редактировать"
+                        >
+                          <Edit2 size={13} />
+                        </button>
+                        <button
+                          onClick={(e) => handleDeleteNews(n, e)}
+                          className="p-1 rounded-lg hover:bg-red-50 dark:hover:bg-red-950/40 text-slate-400 hover:text-red-500 transition"
+                          title="Удалить"
+                        >
+                          <Trash2 size={13} />
+                        </button>
                       </div>
+                    ) : (
+                      /* Non-Author / Non-Admin Actions (Dropdown menu: Report / Block) */
+                      currentUser && (
+                        <div className="relative ml-1">
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setActiveMenuNewsId(activeMenuNewsId === n.id ? null : n.id);
+                            }}
+                            className="p-1 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition"
+                            title="Опции"
+                          >
+                            <MoreVertical size={14} />
+                          </button>
+
+                          {activeMenuNewsId === n.id && (
+                            <div className="absolute right-0 top-7 z-30 w-48 rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xl py-1 animate-fade-in text-xs font-medium">
+                              <button
+                                onClick={(e) => handleReportNews(n, e)}
+                                className="w-full px-3 py-2 text-left hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-2 text-amber-600 dark:text-amber-400 transition"
+                              >
+                                <Flag size={13} />
+                                <span>Пожаловаться на новость</span>
+                              </button>
+                              {n.userId && n.userId !== currentUser.id && (
+                                <button
+                                  onClick={(e) => handleBlockUser(n, e)}
+                                  className="w-full px-3 py-2 text-left hover:bg-slate-50 dark:hover:bg-slate-800 flex items-center gap-2 text-rose-600 dark:text-rose-400 transition"
+                                >
+                                  <Ban size={13} />
+                                  <span>Заблокировать автора</span>
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      )
                     )}
                   </div>
-                  <div className="flex items-center gap-1.5 min-w-0">
-                    <span className="text-xs font-bold text-slate-900 dark:text-white truncate">
-                      {n.authorName || 'ORBIT News'}
-                    </span>
-                    <span className="text-[10px] text-slate-400 dark:text-slate-500 truncate">
-                      {n.authorHandle || `@${n.tag.toLowerCase()}`}
-                    </span>
-                  </div>
                 </div>
 
-                <div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
-                  <span className="text-[9px] font-extrabold uppercase tracking-wider px-2 py-0.5 rounded-full bg-sky-50 dark:bg-sky-950/60 text-sky-600 dark:text-sky-400 border border-sky-100 dark:border-sky-900/40">
-                    {n.tag}
-                  </span>
-                  {isOwnerOrAdmin && (
-                    <button
-                      onClick={(e) => handleDeleteNews(n.id, e)}
-                      className="p-1 rounded-lg hover:bg-red-50 dark:hover:bg-red-950/40 text-slate-300 hover:text-red-500 transition ml-1"
-                      title="Удалить"
-                    >
-                      <Trash2 size={13} />
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              {/* Body Content Row (Flex: Text Left, Thumbnail Right) */}
-              <div className="flex items-start justify-between gap-3 my-2.5">
-                <div className="flex-1 min-w-0">
+                {/* Body Content Row: Title & Content */}
+                <div className="my-2.5">
                   <h3 className="font-bold text-sm sm:text-base text-slate-900 dark:text-white leading-tight line-clamp-2">
                     {n.title}
                   </h3>
-                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 leading-snug line-clamp-2">
+                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 leading-snug line-clamp-3 whitespace-pre-wrap">
                     {n.content}
                   </p>
                 </div>
 
-                {/* Right Square Thumbnail */}
-                {n.mediaUrl ? (
-                  <div className="w-20 h-20 sm:w-24 sm:h-24 rounded-xl overflow-hidden shrink-0 border border-slate-100 dark:border-slate-800 bg-slate-900">
+                {/* Media Attachment (Photo / Video) - ONLY IF mediaUrl exists! Zero empty frames when no photo */}
+                {n.mediaUrl && (
+                  <div className="w-full h-48 sm:h-56 rounded-2xl overflow-hidden border border-slate-100 dark:border-slate-800 bg-slate-900 my-2.5">
                     {n.mediaType === 'video' ? (
                       <video src={n.mediaUrl} className="w-full h-full object-cover" muted />
                     ) : (
                       <img src={n.mediaUrl} alt={n.title} className="w-full h-full object-cover" />
                     )}
                   </div>
-                ) : (
-                  <div className="w-20 h-20 sm:w-24 sm:h-24 rounded-xl shrink-0 border border-slate-100 dark:border-slate-800/80 bg-gradient-to-br from-slate-50 to-slate-100 dark:from-slate-800/40 dark:to-slate-900 flex flex-col items-center justify-center p-2 text-center">
-                    <Newspaper size={20} className="text-slate-300 dark:text-slate-600 mb-1" />
-                    <span className="text-[9px] font-semibold text-slate-400 uppercase tracking-wider">ORBIT</span>
-                  </div>
                 )}
-              </div>
 
-              {/* Footer Row: Timestamp & Interactive Buttons */}
-              <div className="flex items-center justify-between text-slate-400 text-xs pt-2 mt-1 border-t border-slate-50 dark:border-slate-800/50">
-                <div className="flex items-center gap-1 text-[11px] text-slate-400">
-                  <Clock size={12} />
-                  <span>{n.timestamp}</span>
-                </div>
-
-                <div className="flex items-center gap-4">
-                  <button
-                    onClick={(e) => handleToggleLike(n.id, e)}
-                    className={`flex items-center gap-1 transition ${
-                      n.userLiked ? 'text-rose-500 font-bold' : 'hover:text-rose-500'
-                    }`}
-                  >
-                    <Heart size={14} className={n.userLiked ? 'fill-rose-500' : ''} />
-                    <span className="text-xs">{n.likesCount || 0}</span>
-                  </button>
-
-                  <div className="flex items-center gap-1 hover:text-sky-500 transition">
-                    <MessageSquare size={14} />
-                    <span className="text-xs">{n.commentsCount || (n.comments || []).length}</span>
+                {/* Footer Row: Timestamp & Interactive Buttons */}
+                <div className="flex items-center justify-between text-slate-400 text-xs pt-2 mt-1 border-t border-slate-50 dark:border-slate-800/50">
+                  <div className="flex items-center gap-1 text-[11px] text-slate-400">
+                    <Clock size={12} />
+                    <span>{n.timestamp}</span>
                   </div>
 
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      if (navigator.share) {
-                        navigator.share({ title: n.title, text: n.content }).catch(() => {});
-                      } else {
-                        alert('Ссылка скопирована!');
-                      }
-                    }}
-                    className="hover:text-sky-500 transition"
-                  >
-                    <Share2 size={14} />
-                  </button>
+                  <div className="flex items-center gap-4" onClick={(e) => e.stopPropagation()}>
+                    <button
+                      onClick={(e) => handleToggleLike(n.id, e)}
+                      className={`flex items-center gap-1 transition ${
+                        n.userLiked ? 'text-rose-500 font-bold' : 'hover:text-rose-500'
+                      }`}
+                    >
+                      <Heart size={14} className={n.userLiked ? 'fill-rose-500' : ''} />
+                      <span className="text-xs">{n.likesCount || 0}</span>
+                    </button>
+
+                    <div
+                      onClick={() => setActiveNewsModal(n)}
+                      className="flex items-center gap-1 hover:text-sky-500 transition cursor-pointer"
+                    >
+                      <MessageSquare size={14} />
+                      <span className="text-xs">{n.commentsCount || (n.comments || []).length}</span>
+                    </div>
+
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (navigator.share) {
+                          navigator.share({ title: n.title, text: n.content }).catch(() => {});
+                        } else {
+                          alert('Ссылка скопирована!');
+                        }
+                      }}
+                      className="hover:text-sky-500 transition"
+                    >
+                      <Share2 size={14} />
+                    </button>
+                  </div>
                 </div>
               </div>
-            </div>
-          );
-        })}
+            );
+          });
+        })()}
       </div>
 
       {/* Full News Detail Modal */}
@@ -545,12 +831,62 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
                 </span>
                 <span className="text-xs text-slate-400">{activeNewsModal.timestamp}</span>
               </div>
-              <button
-                onClick={() => setActiveNewsModal(null)}
-                className="h-8 w-8 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 transition"
-              >
-                <X size={16} />
-              </button>
+              <div className="flex items-center gap-2">
+                {currentUser &&
+                (activeNewsModal.userId === currentUser.id ||
+                  currentUser.role === 'admin' ||
+                  currentUser.role === 'sysadmin' ||
+                  currentUser.username.toLowerCase() === 'admin' ||
+                  currentUser.handle.toLowerCase() === '@admin') ? (
+                  <div className="flex items-center gap-1">
+                    <button
+                      onClick={(e) => {
+                        const n = activeNewsModal;
+                        setActiveNewsModal(null);
+                        handleStartEditNews(n, e);
+                      }}
+                      className="p-1.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-400 hover:text-sky-500 transition"
+                      title="Редактировать"
+                    >
+                      <Edit2 size={14} />
+                    </button>
+                    <button
+                      onClick={(e) => handleDeleteNews(activeNewsModal.id, e)}
+                      className="p-1.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-400 hover:text-red-500 transition"
+                      title="Удалить"
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                ) : (
+                  currentUser && (
+                    <div className="flex items-center gap-1">
+                      <button
+                        onClick={(e) => handleReportNews(activeNewsModal, e)}
+                        className="p-1.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-400 hover:text-amber-500 transition"
+                        title="Пожаловаться"
+                      >
+                        <Flag size={14} />
+                      </button>
+                      {activeNewsModal.userId && activeNewsModal.userId !== currentUser.id && (
+                        <button
+                          onClick={(e) => handleBlockUser(activeNewsModal, e)}
+                          className="p-1.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-400 hover:text-rose-500 transition"
+                          title="Заблокировать автора"
+                        >
+                          <Ban size={14} />
+                        </button>
+                      )}
+                    </div>
+                  )
+                )}
+                <button
+                  onClick={() => setActiveNewsModal(null)}
+                  className="h-8 w-8 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 transition"
+                >
+                  <X size={16} />
+                </button>
+              </div>
             </div>
 
             {/* Scrollable Content */}
@@ -759,12 +1095,136 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
 
               <button
                 type="submit"
-                className="w-full mt-2 py-2.5 rounded-2xl bg-sky-500 hover:bg-sky-400 text-white text-xs font-semibold flex items-center justify-center gap-2 shadow-md shadow-sky-500/20 transition"
+                disabled={isPublishing}
+                className="w-full mt-2 py-2.5 rounded-2xl bg-sky-500 hover:bg-sky-400 disabled:opacity-50 text-white text-xs font-semibold flex items-center justify-center gap-2 shadow-md shadow-sky-500/20 transition"
               >
-                <span>{editingNews ? 'Сохранить изменения' : 'Опубликовать'}</span>
+                <span>{isPublishing ? 'Сохранение...' : editingNews ? 'Сохранить изменения' : 'Опубликовать'}</span>
                 <Send size={14} />
               </button>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Toast Notification */}
+      {toastMessage && (
+        <div className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-2xl bg-slate-900 text-white text-xs font-semibold shadow-2xl flex items-center gap-2 border border-slate-700 animate-fade-in">
+          <Check size={14} className="text-emerald-400" />
+          <span>{toastMessage}</span>
+        </div>
+      )}
+
+      {/* Delete News Confirmation Modal */}
+      {newsToDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-md animate-fade-in">
+          <div className="w-full max-w-xs rounded-3xl p-5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl space-y-4 text-center">
+            <div className="h-12 w-12 mx-auto rounded-full bg-red-500/10 text-red-500 flex items-center justify-center border border-red-500/20">
+              <Trash2 size={22} />
+            </div>
+            <div>
+              <h4 className="text-sm font-bold text-slate-800 dark:text-white">Удалить новость?</h4>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 line-clamp-2">
+                "{newsToDelete.title}"
+              </p>
+            </div>
+            <div className="flex items-center gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setNewsToDelete(null)}
+                className="flex-1 py-2.5 rounded-2xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 text-xs font-semibold hover:bg-slate-200 dark:hover:bg-slate-700 transition"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                onClick={confirmDeleteNews}
+                className="flex-1 py-2.5 rounded-2xl bg-red-600 hover:bg-red-500 text-white text-xs font-semibold shadow-md shadow-red-600/20 transition"
+              >
+                Удалить
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Report News Modal */}
+      {newsToReport && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-md animate-fade-in">
+          <div className="w-full max-w-xs rounded-3xl p-5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-amber-500 font-bold text-sm">
+                <Flag size={18} />
+                <span>Пожаловаться</span>
+              </div>
+              <button
+                onClick={() => setNewsToReport(null)}
+                className="p-1 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-400"
+              >
+                <X size={16} />
+              </button>
+            </div>
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              Укажите причину жалобы на публикацию "{newsToReport.title}":
+            </p>
+            <textarea
+              rows={3}
+              value={reportReasonInput}
+              onChange={(e) => setReportReasonInput(e.target.value)}
+              placeholder="Спам, оскорбления, фейк..."
+              className="w-full px-3 py-2 rounded-2xl text-xs bg-slate-50 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 outline-none focus:ring-2 focus:ring-amber-500 text-slate-800 dark:text-white resize-none"
+              autoFocus
+            />
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setNewsToReport(null)}
+                className="flex-1 py-2 rounded-2xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 text-xs font-semibold"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                onClick={confirmReportNews}
+                className="flex-1 py-2 rounded-2xl bg-amber-500 hover:bg-amber-400 text-white text-xs font-semibold shadow-md shadow-amber-500/20 transition"
+              >
+                Отправить
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Block User Confirmation Modal */}
+      {userToBlock && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-md animate-fade-in">
+          <div className="w-full max-w-xs rounded-3xl p-5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl space-y-4 text-center">
+            <div className="h-12 w-12 mx-auto rounded-full bg-rose-500/10 text-rose-500 flex items-center justify-center border border-rose-500/20">
+              <Ban size={22} />
+            </div>
+            <div>
+              <h4 className="text-sm font-bold text-slate-800 dark:text-white">
+                Заблокировать {userToBlock.userName}?
+              </h4>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                Публикации этого автора перестанут быть видимыми для вас.
+              </p>
+            </div>
+            <div className="flex items-center gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setUserToBlock(null)}
+                className="flex-1 py-2.5 rounded-2xl bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 text-xs font-semibold"
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                onClick={confirmBlockUser}
+                className="flex-1 py-2.5 rounded-2xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold shadow-md shadow-rose-600/20 transition"
+              >
+                Заблокировать
+              </button>
+            </div>
           </div>
         </div>
       )}

@@ -46,6 +46,42 @@ class RealtimeServer {
 
               ws.send(JSON.stringify({ type: 'auth_success', userId: decoded.id }));
             });
+          } else if (data.type === 'call_user') {
+            const { targetUserId, callType, caller, channelId } = data;
+            if (targetUserId) {
+              this.sendToUser(targetUserId, {
+                type: 'incoming_call',
+                caller,
+                callType,
+                channelId,
+              });
+            } else {
+              this.broadcast({
+                type: 'incoming_call',
+                caller,
+                callType,
+                channelId,
+              });
+            }
+          } else if (data.type === 'accept_call') {
+            this.broadcast({
+              type: 'call_accepted',
+              callerId: data.callerId,
+              responderId: ws.userId,
+            });
+          } else if (data.type === 'decline_call') {
+            this.broadcast({
+              type: 'call_declined',
+              callerId: data.callerId,
+              responderId: ws.userId,
+            });
+          } else if (data.type === 'start_live_stream') {
+            this.broadcast({
+              type: 'live_stream_started',
+              channelId: data.channelId,
+              channelTitle: data.channelTitle,
+              authorName: data.authorName,
+            });
           }
         } catch (e) {
           console.error('WebSocket message parsing error:', e);

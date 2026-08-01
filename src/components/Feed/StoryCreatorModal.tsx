@@ -9,16 +9,18 @@ import {
   Lock,
   MessageCircle,
   Heart,
-  Image as ImageIcon,
   Sparkles,
   ChevronRight,
   ChevronLeft,
   Video as VideoIcon,
   UploadCloud,
   RefreshCw,
+  Loader2,
+  Check,
 } from 'lucide-react';
 import { api } from '../../services/api';
 import { isVideoUrl, checkVideoDuration, processMediaFileForStory } from '../../utils/media';
+import { haptics } from '../../utils/haptics';
 
 interface StoryCreatorModalProps {
   isOpen: boolean;
@@ -47,7 +49,6 @@ export const StoryCreatorModal: React.FC<StoryCreatorModalProps> = ({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const replaceFileInputRef = useRef<HTMLInputElement>(null);
 
-  // Synchronize slides whenever modal opens or initialImageUrl is provided
   useEffect(() => {
     if (isOpen) {
       if (initialImageUrl && initialImageUrl.trim() !== '') {
@@ -58,6 +59,7 @@ export const StoryCreatorModal: React.FC<StoryCreatorModalProps> = ({
       setActiveSlideIndex(0);
       setCaption('');
       setIsProcessingFile(false);
+      haptics.tap();
     }
   }, [isOpen, initialImageUrl]);
 
@@ -67,6 +69,7 @@ export const StoryCreatorModal: React.FC<StoryCreatorModalProps> = ({
     const files = e.target.files;
     if (!files || files.length === 0) return;
 
+    haptics.tap();
     setIsProcessingFile(true);
     const fileList: File[] = Array.from(files);
 
@@ -89,9 +92,11 @@ export const StoryCreatorModal: React.FC<StoryCreatorModalProps> = ({
             }
             return prev;
           });
+          haptics.success();
         }
       }
     } catch (err: any) {
+      haptics.error();
       alert(err.message || 'Ошибка обработки файла');
     } finally {
       setIsProcessingFile(false);
@@ -103,6 +108,7 @@ export const StoryCreatorModal: React.FC<StoryCreatorModalProps> = ({
     const file = e.target.files?.[0];
     if (!file) return;
 
+    haptics.tap();
     setIsProcessingFile(true);
     try {
       if (file.type.startsWith('video/')) {
@@ -120,8 +126,10 @@ export const StoryCreatorModal: React.FC<StoryCreatorModalProps> = ({
           updated[activeSlideIndex] = mediaUrl;
           return updated;
         });
+        haptics.success();
       }
     } catch (err: any) {
+      haptics.error();
       alert(err.message || 'Ошибка загрузки файла');
     } finally {
       setIsProcessingFile(false);
@@ -130,6 +138,7 @@ export const StoryCreatorModal: React.FC<StoryCreatorModalProps> = ({
   };
 
   const handleRemoveSlide = (index: number) => {
+    haptics.tap();
     const updated = slides.filter((_, i) => i !== index);
     setSlides(updated);
     if (updated.length === 0) {
@@ -143,10 +152,12 @@ export const StoryCreatorModal: React.FC<StoryCreatorModalProps> = ({
     e.preventDefault();
     const validSlides = slides.map((s) => s.trim()).filter(Boolean);
     if (validSlides.length === 0) {
-      alert('Добавьте хотя бы одно фото или короткое видео из памяти устройства');
+      haptics.error();
+      alert('Добавьте хотя бы одно фото или видео из памяти устройства');
       return;
     }
 
+    haptics.medium();
     setIsSubmitting(true);
     try {
       const primaryUrl = validSlides[0];
@@ -157,9 +168,11 @@ export const StoryCreatorModal: React.FC<StoryCreatorModalProps> = ({
         hideReactions,
       });
 
+      haptics.success();
       onStoryCreated(created);
       onClose();
     } catch (err: any) {
+      haptics.error();
       alert(err.message || 'Ошибка при создании истории');
     } finally {
       setIsSubmitting(false);
@@ -169,28 +182,37 @@ export const StoryCreatorModal: React.FC<StoryCreatorModalProps> = ({
   const currentSlideUrl = slides[activeSlideIndex] || '';
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-md animate-fade-in">
-      <div className="relative w-full max-w-md rounded-3xl p-5 bg-slate-900 border border-slate-800 text-white shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto no-scrollbar">
-        {/* Header */}
-        <div className="flex items-center justify-between pb-3 border-b border-slate-800">
-          <div className="flex items-center gap-2">
-            <div className="h-8 w-8 rounded-full bg-sky-500/20 text-sky-400 flex items-center justify-center font-bold">
+    <div className="fixed inset-0 z-[99999] flex items-center justify-center p-3 sm:p-4 bg-slate-900/40 backdrop-blur-xl animate-fade-in">
+      {/* Light minimalist glassmorphism container with floating ambient bubbles */}
+      <div className="relative w-full max-w-md bg-white/85 dark:bg-slate-900/90 backdrop-blur-2xl border border-white/80 dark:border-slate-800/80 rounded-3xl shadow-2xl shadow-sky-500/10 p-5 overflow-hidden flex flex-col max-h-[92vh] text-slate-800 dark:text-slate-100 space-y-4">
+        {/* Floating Glass Ambient Bubbles */}
+        <div className="absolute -top-12 -left-12 w-44 h-44 rounded-full bg-gradient-to-br from-sky-300/30 to-indigo-300/20 blur-2xl pointer-events-none animate-pulse" />
+        <div className="absolute -bottom-10 -right-10 w-48 h-48 rounded-full bg-gradient-to-tr from-purple-300/30 to-pink-300/20 blur-2xl pointer-events-none animate-pulse" />
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-64 h-64 rounded-full bg-sky-200/20 dark:bg-sky-500/10 blur-3xl pointer-events-none" />
+
+        {/* Modal Header */}
+        <div className="relative z-10 flex items-center justify-between pb-3 border-b border-slate-200/60 dark:border-slate-800/60 shrink-0">
+          <div className="flex items-center gap-2.5">
+            <div className="h-9 w-9 rounded-2xl bg-gradient-to-br from-sky-400 to-indigo-500 text-white flex items-center justify-center font-black shadow-md shadow-sky-500/20 shrink-0">
               <Sparkles size={18} />
             </div>
             <div>
-              <h3 className="text-sm font-bold">Новая история</h3>
-              <p className="text-[10px] text-slate-400">Фото или видео (до 1 мин) из памяти устройства</p>
+              <h3 className="text-sm font-bold text-slate-900 dark:text-white tracking-tight">Новая история</h3>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 font-medium">Фото или видео из памяти устройства</p>
             </div>
           </div>
           <button
-            onClick={onClose}
-            className="h-8 w-8 rounded-full bg-slate-800 flex items-center justify-center text-slate-400 hover:text-white transition"
+            onClick={() => {
+              haptics.tap();
+              onClose();
+            }}
+            className="h-8 w-8 rounded-full bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 flex items-center justify-center text-slate-500 dark:text-slate-300 transition active:scale-95"
           >
             <X size={16} />
           </button>
         </div>
 
-        {/* Hidden Multi-file Inputs for Local Storage Picker */}
+        {/* Hidden Inputs */}
         <input
           type="file"
           ref={fileInputRef}
@@ -207,9 +229,10 @@ export const StoryCreatorModal: React.FC<StoryCreatorModalProps> = ({
           className="hidden"
         />
 
-        {/* Preview & Slide Switcher */}
-        <div className="space-y-2.5">
-          <div className="relative h-64 w-full rounded-2xl bg-slate-950 border border-slate-800 overflow-hidden flex items-center justify-center group shadow-inner">
+        {/* Modal Content - Scrollable */}
+        <div className="relative z-10 overflow-y-auto no-scrollbar space-y-4 pr-0.5 flex-1">
+          {/* Preview Canvas */}
+          <div className="relative h-64 w-full rounded-2xl bg-slate-100 dark:bg-slate-950/80 border border-slate-200/80 dark:border-slate-800/80 overflow-hidden flex items-center justify-center shadow-inner group">
             {currentSlideUrl ? (
               isVideoUrl(currentSlideUrl) ? (
                 <video
@@ -231,22 +254,25 @@ export const StoryCreatorModal: React.FC<StoryCreatorModalProps> = ({
             ) : (
               <button
                 type="button"
-                onClick={() => fileInputRef.current?.click()}
+                onClick={() => {
+                  haptics.tap();
+                  fileInputRef.current?.click();
+                }}
                 disabled={isProcessingFile}
-                className="w-full h-full flex flex-col items-center justify-center gap-2 text-slate-400 hover:text-white hover:bg-slate-900/50 transition p-4 cursor-pointer"
+                className="w-full h-full flex flex-col items-center justify-center gap-2.5 text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-white transition p-5 cursor-pointer bg-white/40 dark:bg-slate-900/40 backdrop-blur-sm"
               >
                 {isProcessingFile ? (
-                  <RefreshCw size={32} className="animate-spin text-sky-400" />
+                  <RefreshCw size={32} className="animate-spin text-sky-500" />
                 ) : (
-                  <UploadCloud size={36} className="text-sky-400 animate-pulse" />
+                  <div className="h-14 w-14 rounded-2xl bg-sky-500/10 text-sky-500 flex items-center justify-center shadow-md">
+                    <UploadCloud size={30} className="animate-pulse" />
+                  </div>
                 )}
-                <span className="text-xs font-semibold text-center leading-snug">
-                  {isProcessingFile
-                    ? 'Загрузка файла...'
-                    : 'Выбрать фото или видео с устройства'}
+                <span className="text-xs font-bold text-center text-slate-800 dark:text-slate-200">
+                  {isProcessingFile ? 'Загрузка медиафайла...' : 'Нажмите для выбора фото или видео'}
                 </span>
-                <span className="text-[10px] text-slate-500 text-center">
-                  Поддерживаются фото и видео до 1 минуты (макс. 5 слайдов)
+                <span className="text-[10px] text-slate-400 text-center font-medium max-w-xs">
+                  Поддерживаются видео до 1 минуты и фото высокое разрешение (до 5 слайдов)
                 </span>
               </button>
             )}
@@ -256,27 +282,33 @@ export const StoryCreatorModal: React.FC<StoryCreatorModalProps> = ({
               <>
                 <button
                   type="button"
-                  onClick={() => setActiveSlideIndex((prev) => Math.max(0, prev - 1))}
+                  onClick={() => {
+                    haptics.tap();
+                    setActiveSlideIndex((prev) => Math.max(0, prev - 1));
+                  }}
                   disabled={activeSlideIndex === 0}
-                  className="absolute left-2 top-1/2 -translate-y-1/2 h-8 w-8 rounded-full bg-black/60 hover:bg-black/80 text-white disabled:opacity-30 flex items-center justify-center backdrop-blur-xs transition"
+                  className="absolute left-2 top-1/2 -translate-y-1/2 h-8 w-8 rounded-full bg-white/80 dark:bg-black/60 hover:bg-white dark:hover:bg-black text-slate-800 dark:text-white disabled:opacity-30 flex items-center justify-center backdrop-blur-md transition shadow"
                 >
                   <ChevronLeft size={18} />
                 </button>
                 <button
                   type="button"
-                  onClick={() => setActiveSlideIndex((prev) => Math.min(slides.length - 1, prev + 1))}
+                  onClick={() => {
+                    haptics.tap();
+                    setActiveSlideIndex((prev) => Math.min(slides.length - 1, prev + 1));
+                  }}
                   disabled={activeSlideIndex === slides.length - 1}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 h-8 w-8 rounded-full bg-black/60 hover:bg-black/80 text-white disabled:opacity-30 flex items-center justify-center backdrop-blur-xs transition"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 h-8 w-8 rounded-full bg-white/80 dark:bg-black/60 hover:bg-white dark:hover:bg-black text-slate-800 dark:text-white disabled:opacity-30 flex items-center justify-center backdrop-blur-md transition shadow"
                 >
                   <ChevronRight size={18} />
                 </button>
               </>
             )}
 
-            {/* Slide Count Badge & Video Indicator */}
+            {/* Slide Counter Badge */}
             {slides.length > 0 && (
-              <div className="absolute bottom-2.5 right-2.5 flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-black/70 backdrop-blur-md text-[10px] font-bold text-white/90 border border-white/10">
-                {isVideoUrl(currentSlideUrl) && <VideoIcon size={12} className="text-sky-400" />}
+              <div className="absolute bottom-2.5 right-2.5 flex items-center gap-1.5 px-3 py-1 rounded-full bg-white/85 dark:bg-black/70 backdrop-blur-md text-[10px] font-bold text-slate-800 dark:text-white shadow border border-white/50 dark:border-white/10">
+                {isVideoUrl(currentSlideUrl) && <VideoIcon size={12} className="text-sky-500" />}
                 <span>
                   Слайд {activeSlideIndex + 1} из {slides.length}
                 </span>
@@ -286,12 +318,15 @@ export const StoryCreatorModal: React.FC<StoryCreatorModalProps> = ({
 
           {/* Action Row for Active Slide */}
           {slides.length > 0 && (
-            <div className="flex items-center justify-between gap-2 px-1">
+            <div className="flex items-center justify-between gap-2">
               <button
                 type="button"
-                onClick={() => replaceFileInputRef.current?.click()}
+                onClick={() => {
+                  haptics.tap();
+                  replaceFileInputRef.current?.click();
+                }}
                 disabled={isProcessingFile}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-sky-400 text-xs font-semibold transition active:scale-95"
+                className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-sky-600 dark:text-sky-400 text-xs font-semibold transition active:scale-95"
               >
                 <RefreshCw size={13} className={isProcessingFile ? 'animate-spin' : ''} />
                 <span>Заменить файл</span>
@@ -300,7 +335,7 @@ export const StoryCreatorModal: React.FC<StoryCreatorModalProps> = ({
               <button
                 type="button"
                 onClick={() => handleRemoveSlide(activeSlideIndex)}
-                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-red-500/10 hover:bg-red-500/20 text-red-400 text-xs font-semibold transition active:scale-95"
+                className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-red-500/10 hover:bg-red-500/20 text-red-600 dark:text-red-400 text-xs font-semibold transition active:scale-95"
               >
                 <Trash2 size={13} />
                 <span>Удалить слайд</span>
@@ -315,15 +350,18 @@ export const StoryCreatorModal: React.FC<StoryCreatorModalProps> = ({
               return (
                 <div
                   key={idx}
-                  onClick={() => setActiveSlideIndex(idx)}
+                  onClick={() => {
+                    haptics.tap();
+                    setActiveSlideIndex(idx);
+                  }}
                   className={`relative h-14 w-14 rounded-xl border-2 overflow-hidden shrink-0 cursor-pointer transition ${
                     activeSlideIndex === idx
                       ? 'border-sky-500 scale-105 shadow-md shadow-sky-500/20'
-                      : 'border-slate-800 opacity-60 hover:opacity-100'
+                      : 'border-slate-200 dark:border-slate-800 opacity-60 hover:opacity-100'
                   }`}
                 >
                   {isVideo ? (
-                    <div className="h-full w-full bg-slate-950 flex items-center justify-center relative">
+                    <div className="h-full w-full bg-slate-900 flex items-center justify-center relative">
                       <video src={s} className="h-full w-full object-cover" />
                       <div className="absolute inset-0 bg-black/30 flex items-center justify-center">
                         <VideoIcon size={16} className="text-sky-400 drop-shadow" />
@@ -352,118 +390,145 @@ export const StoryCreatorModal: React.FC<StoryCreatorModalProps> = ({
             {slides.length < 5 && (
               <button
                 type="button"
-                onClick={() => fileInputRef.current?.click()}
+                onClick={() => {
+                  haptics.tap();
+                  fileInputRef.current?.click();
+                }}
                 disabled={isProcessingFile}
-                className="h-14 w-14 rounded-xl border border-dashed border-sky-500/50 bg-sky-500/10 hover:bg-sky-500/20 text-sky-400 flex flex-col items-center justify-center text-[9px] font-bold gap-0.5 shrink-0 transition"
+                className="h-14 w-14 rounded-xl border border-dashed border-sky-400/60 bg-sky-500/10 hover:bg-sky-500/20 text-sky-600 dark:text-sky-400 flex flex-col items-center justify-center text-[10px] font-bold gap-0.5 shrink-0 transition"
               >
                 <Plus size={16} />
                 <span>+ Слайд</span>
               </button>
             )}
           </div>
-        </div>
 
-        {/* Input Form Controls */}
-        <form onSubmit={handleSubmit} className="space-y-3.5 pt-1">
-          {/* Story Caption */}
-          <div>
-            <label className="block text-xs font-semibold mb-1 text-slate-300">
-              Подпись к истории
-            </label>
-            <input
-              type="text"
-              value={caption}
-              onChange={(e) => setCaption(e.target.value)}
-              placeholder="Добавьте описание или заголовок..."
-              className="w-full px-3.5 py-2.5 rounded-xl text-xs border border-slate-800 bg-slate-950 text-white outline-none focus:ring-1 focus:ring-sky-500 placeholder:text-slate-600"
-            />
-          </div>
-
-          {/* Audience Selector */}
-          <div>
-            <label className="block text-xs font-semibold mb-1 text-slate-300">
-              Кто увидят историю?
-            </label>
-            <div className="grid grid-cols-3 gap-1.5">
-              <button
-                type="button"
-                onClick={() => setAudience('everyone')}
-                className={`py-2 px-2 rounded-xl text-xs font-medium flex items-center justify-center gap-1 border transition ${
-                  audience === 'everyone'
-                    ? 'bg-sky-500/20 text-sky-400 border-sky-500/40'
-                    : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-white'
-                }`}
-              >
-                <Globe size={13} />
-                <span>Все</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setAudience('close_friends')}
-                className={`py-2 px-2 rounded-xl text-xs font-medium flex items-center justify-center gap-1 border transition ${
-                  audience === 'close_friends'
-                    ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40'
-                    : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-white'
-                }`}
-              >
-                <Users size={13} />
-                <span>Близкие</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setAudience('contacts')}
-                className={`py-2 px-2 rounded-xl text-xs font-medium flex items-center justify-center gap-1 border transition ${
-                  audience === 'contacts'
-                    ? 'bg-purple-500/20 text-purple-400 border-purple-500/40'
-                    : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-white'
-                }`}
-              >
-                <Lock size={13} />
-                <span>Контакты</span>
-              </button>
+          {/* Form Controls */}
+          <form onSubmit={handleSubmit} className="space-y-3.5 pt-2">
+            <div>
+              <label className="block text-xs font-bold mb-1 text-slate-700 dark:text-slate-300">
+                Подпись к истории
+              </label>
+              <input
+                type="text"
+                value={caption}
+                onChange={(e) => setCaption(e.target.value)}
+                placeholder="Добавьте описание или мысль..."
+                className="w-full px-3.5 py-2.5 rounded-2xl text-xs font-medium border border-slate-200/80 dark:border-slate-800 bg-white/70 dark:bg-slate-950/70 text-slate-800 dark:text-slate-100 outline-none focus:ring-2 focus:ring-sky-500 placeholder:text-slate-400"
+              />
             </div>
-          </div>
 
-          {/* Toggles */}
-          <div className="space-y-2 pt-1 border-t border-slate-800">
-            <label className="flex items-center justify-between text-xs text-slate-300 cursor-pointer">
-              <span className="flex items-center gap-2">
-                <MessageCircle size={14} className="text-sky-400" />
-                <span>Отключить комментарии</span>
-              </span>
-              <input
-                type="checkbox"
-                checked={hideComments}
-                onChange={(e) => setHideComments(e.target.checked)}
-                className="h-4 w-4 rounded accent-sky-500 cursor-pointer"
-              />
-            </label>
+            {/* Audience Selector */}
+            <div>
+              <label className="block text-xs font-bold mb-1 text-slate-700 dark:text-slate-300">
+                Видимость истории
+              </label>
+              <div className="grid grid-cols-3 gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    haptics.tap();
+                    setAudience('everyone');
+                  }}
+                  className={`py-2 px-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1 border transition ${
+                    audience === 'everyone'
+                      ? 'bg-sky-500 text-white border-sky-500 shadow-sm'
+                      : 'bg-slate-100/80 dark:bg-slate-800/80 text-slate-600 dark:text-slate-300 border-transparent hover:bg-slate-200'
+                  }`}
+                >
+                  <Globe size={13} />
+                  <span>Все</span>
+                </button>
 
-            <label className="flex items-center justify-between text-xs text-slate-300 cursor-pointer">
-              <span className="flex items-center gap-2">
-                <Heart size={14} className="text-pink-400" />
-                <span>Отключить реакции</span>
-              </span>
-              <input
-                type="checkbox"
-                checked={hideReactions}
-                onChange={(e) => setHideReactions(e.target.checked)}
-                className="h-4 w-4 rounded accent-sky-500 cursor-pointer"
-              />
-            </label>
-          </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    haptics.tap();
+                    setAudience('close_friends');
+                  }}
+                  className={`py-2 px-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1 border transition ${
+                    audience === 'close_friends'
+                      ? 'bg-emerald-500 text-white border-emerald-500 shadow-sm'
+                      : 'bg-slate-100/80 dark:bg-slate-800/80 text-slate-600 dark:text-slate-300 border-transparent hover:bg-slate-200'
+                  }`}
+                >
+                  <Users size={13} />
+                  <span>Близкие</span>
+                </button>
 
-          {/* Submit Button */}
-          <button
-            type="submit"
-            disabled={isSubmitting || isProcessingFile || slides.length === 0}
-            className="w-full py-3 rounded-xl bg-sky-500 hover:bg-sky-400 disabled:opacity-50 text-white font-bold text-xs shadow-lg shadow-sky-500/20 active:scale-95 transition flex items-center justify-center gap-2"
-          >
-            {isSubmitting ? 'Публикация...' : 'Опубликовать историю'}
-          </button>
-        </form>
+                <button
+                  type="button"
+                  onClick={() => {
+                    haptics.tap();
+                    setAudience('contacts');
+                  }}
+                  className={`py-2 px-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1 border transition ${
+                    audience === 'contacts'
+                      ? 'bg-purple-500 text-white border-purple-500 shadow-sm'
+                      : 'bg-slate-100/80 dark:bg-slate-800/80 text-slate-600 dark:text-slate-300 border-transparent hover:bg-slate-200'
+                  }`}
+                >
+                  <Lock size={13} />
+                  <span>Контакты</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Toggles */}
+            <div className="space-y-2 pt-2 border-t border-slate-200/60 dark:border-slate-800/60">
+              <label className="flex items-center justify-between text-xs font-semibold text-slate-700 dark:text-slate-300 cursor-pointer">
+                <span className="flex items-center gap-2">
+                  <MessageCircle size={14} className="text-sky-500" />
+                  <span>Отключить комментарии</span>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={hideComments}
+                  onChange={(e) => {
+                    haptics.tap();
+                    setHideComments(e.target.checked);
+                  }}
+                  className="h-4 w-4 rounded accent-sky-500 cursor-pointer"
+                />
+              </label>
+
+              <label className="flex items-center justify-between text-xs font-semibold text-slate-700 dark:text-slate-300 cursor-pointer">
+                <span className="flex items-center gap-2">
+                  <Heart size={14} className="text-pink-500" />
+                  <span>Отключить реакции</span>
+                </span>
+                <input
+                  type="checkbox"
+                  checked={hideReactions}
+                  onChange={(e) => {
+                    haptics.tap();
+                    setHideReactions(e.target.checked);
+                  }}
+                  className="h-4 w-4 rounded accent-sky-500 cursor-pointer"
+                />
+              </label>
+            </div>
+
+            {/* Submit Button */}
+            <button
+              type="submit"
+              disabled={isSubmitting || isProcessingFile || slides.length === 0}
+              className="w-full py-3.5 rounded-2xl bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-600 hover:to-indigo-700 disabled:opacity-50 text-white font-bold text-xs shadow-lg shadow-sky-500/25 active:scale-98 transition flex items-center justify-center gap-2 mt-2"
+            >
+              {isSubmitting ? (
+                <>
+                  <Loader2 size={16} className="animate-spin text-white" />
+                  <span>Опубликование истории...</span>
+                </>
+              ) : (
+                <>
+                  <Sparkles size={16} />
+                  <span>Опубликовать историю</span>
+                </>
+              )}
+            </button>
+          </form>
+        </div>
       </div>
     </div>
   );

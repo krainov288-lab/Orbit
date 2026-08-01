@@ -96,6 +96,7 @@ export interface DBNewsComment {
 export interface DBNews {
   id: string;
   userId?: string;
+  channelId?: string;
   authorName?: string;
   authorHandle?: string;
   authorAvatar?: string;
@@ -123,9 +124,14 @@ export interface DBChannelGroup {
   avatarColor: string;
   creatorId: string;
   adminIds: string[];
+  moderatorIds?: string[];
   memberIds: string[];
   createdAt: number;
   inviteLink?: string;
+  allowCalls?: boolean;
+  slowMode?: number;
+  signPosts?: boolean;
+  pinnedMessageId?: string;
 }
 
 export interface DBNotification {
@@ -242,9 +248,13 @@ class Database {
             const role = this.getUserRole(u);
             const isAdmin = role === 'admin' || role === 'sysadmin' || u.username.toLowerCase() === 'admin' || u.handle.toLowerCase() === '@admin';
             if (isAdmin) {
-              u.balance = 100000;
-            } else if (u.balance === undefined || u.balance === null) {
-              u.balance = 1000;
+              if (u.balance === undefined || u.balance === null || u.balance < 100000) {
+                u.balance = 100000;
+              }
+            } else {
+              if (u.balance === undefined || u.balance === null || u.balance === 1000) {
+                u.balance = 0;
+              }
             }
           });
         }
@@ -400,11 +410,12 @@ class Database {
     if (!this.data.stories) return false;
     const story = this.data.stories.find((s) => s.id === storyId);
     if (!story) return false;
-    if (story.userId !== userId) {
-      const user = this.getUserById(userId);
-      const role = user ? this.getUserRole(user) : 'user';
-      if (!['admin', 'sysadmin'].includes(role)) return false;
-    }
+    const user = this.getUserById(userId);
+    const role = user ? this.getUserRole(user) : 'user';
+    const isAdmin = ['admin', 'sysadmin'].includes(role) || (user ? (user.username.toLowerCase() === 'admin' || user.handle.toLowerCase() === '@admin') : false);
+    const isAuthor = !story.userId || String(story.userId) === String(userId);
+    if (!isAuthor && !isAdmin) return false;
+
     this.data.stories = this.data.stories.filter((s) => s.id !== storyId);
     this.save();
     return true;
@@ -709,6 +720,25 @@ class Database {
     return conversation;
   }
 
+  public getMessagesForChannelGroup(channelGroupId: string, limit: number = 50, beforeId?: string): DBMessage[] {
+    let conversation = (this.data.messages || []).filter((m) => m.recipientId === channelGroupId);
+
+    conversation.sort((a, b) => a.timestamp - b.timestamp);
+
+    if (beforeId) {
+      const idx = conversation.findIndex((m) => m.id === beforeId);
+      if (idx > 0) {
+        conversation = conversation.slice(0, idx);
+      }
+    }
+
+    if (conversation.length > limit) {
+      conversation = conversation.slice(conversation.length - limit);
+    }
+
+    return conversation;
+  }
+
   public addMessage(msg: DBMessage): DBMessage {
     this.data.messages.push(msg);
     this.save();
@@ -783,11 +813,12 @@ class Database {
   public updateNews(id: string, userId: string, updates: Partial<DBNews>): DBNews | undefined {
     const item = this.getNewsById(id);
     if (!item) return undefined;
-    if (item.userId && item.userId !== userId) {
-      const user = this.getUserById(userId);
-      const role = user ? this.getUserRole(user) : 'user';
-      if (!['admin', 'sysadmin'].includes(role)) return undefined;
-    }
+    const user = this.getUserById(userId);
+    const role = user ? this.getUserRole(user) : 'user';
+    const isAdmin = ['admin', 'sysadmin'].includes(role) || user?.username.toLowerCase() === 'admin' || user?.handle.toLowerCase() === '@admin';
+    const isAuthor = !item.userId || item.userId === userId;
+    if (!isAuthor && !isAdmin) return undefined;
+
     Object.assign(item, updates);
     this.save();
     return item;
@@ -798,11 +829,12 @@ class Database {
     const idx = this.data.news.findIndex((n) => n.id === id);
     if (idx === -1) return false;
     const item = this.data.news[idx];
-    if (item.userId && item.userId !== userId) {
-      const user = this.getUserById(userId);
-      const role = user ? this.getUserRole(user) : 'user';
-      if (!['admin', 'sysadmin'].includes(role)) return false;
-    }
+    const user = this.getUserById(userId);
+    const role = user ? this.getUserRole(user) : 'user';
+    const isAdmin = ['admin', 'sysadmin'].includes(role) || (user ? (user.username.toLowerCase() === 'admin' || user.handle.toLowerCase() === '@admin') : false);
+    const isAuthor = !item.userId || String(item.userId) === String(userId);
+    if (!isAuthor && !isAdmin) return false;
+
     this.data.news.splice(idx, 1);
     this.save();
     return true;
@@ -872,13 +904,64 @@ class Database {
   public leaveChannelGroup(cgId: string, userId: string): boolean {
     const cg = this.getChannelGroupById(cgId);
     if (!cg) return false;
-    const idx = cg.memberIds.indexOf(userId);
-    if (idx !== -1) {
-      cg.memberIds.splice(idx, 1);
+    cg.memberIds = (cg.memberIds || []).filter((id) => id !== userId);
+    cg.adminIds = (cg.adminIds || []).filter((id) => id !== userId);
+    if (cg.moderatorIds) {
+      cg.moderatorIds = cg.moderatorIds.filter((id) => id !== userId);
+    }
+    this.save();
+    return true;
+  }
+
+  public updateChannelGroup(cgId: string, updates: Partial<DBChannelGroup>): DBChannelGroup | null {
+    const cg = this.getChannelGroupById(cgId);
+    if (!cg) return null;
+    Object.assign(cg, updates);
+    this.save();
+    return cg;
+  }
+
+  public deleteChannelGroup(cgId: string): boolean {
+    if (!this.data.channelsGroups) return false;
+    const initialLen = this.data.channelsGroups.length;
+    this.data.channelsGroups = this.data.channelsGroups.filter((cg) => cg.id !== cgId);
+    if (this.data.channelsGroups.length < initialLen) {
+      // Also delete messages associated with this channel/group
+      this.data.messages = (this.data.messages || []).filter((m) => m.recipientId !== cgId);
+      // Delete news items created by this channel
+      this.data.news = (this.data.news || []).filter((n) => n.channelId !== cgId);
       this.save();
       return true;
     }
     return false;
+  }
+
+  public toggleChannelGroupAdmin(cgId: string, targetUserId: string): DBChannelGroup | null {
+    const cg = this.getChannelGroupById(cgId);
+    if (!cg) return null;
+    if (!cg.adminIds) cg.adminIds = [];
+    if (cg.adminIds.includes(targetUserId)) {
+      if (cg.creatorId !== targetUserId) {
+        cg.adminIds = cg.adminIds.filter((id) => id !== targetUserId);
+      }
+    } else {
+      cg.adminIds.push(targetUserId);
+    }
+    this.save();
+    return cg;
+  }
+
+  public toggleChannelGroupModerator(cgId: string, targetUserId: string): DBChannelGroup | null {
+    const cg = this.getChannelGroupById(cgId);
+    if (!cg) return null;
+    if (!cg.moderatorIds) cg.moderatorIds = [];
+    if (cg.moderatorIds.includes(targetUserId)) {
+      cg.moderatorIds = cg.moderatorIds.filter((id) => id !== targetUserId);
+    } else {
+      cg.moderatorIds.push(targetUserId);
+    }
+    this.save();
+    return cg;
   }
 
   // Notifications

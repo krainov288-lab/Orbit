@@ -774,29 +774,31 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
           Оформление и аккаунт
         </div>
 
-        <div className="flex items-center justify-between p-3 rounded-2xl hover:bg-black/5 dark:hover:bg-white/5 transition">
+        <div className="flex items-center justify-between p-3 rounded-2xl transition opacity-60">
           <div className="flex items-center gap-3">
-            <div className="h-8 w-8 rounded-xl bg-amber-500/10 dark:bg-blue-500/10 text-amber-500 dark:text-blue-400 flex items-center justify-center border border-amber-500/20 dark:border-blue-500/20">
-              {isDark ? <Moon size={16} /> : <Sun size={16} />}
+            <div className="h-8 w-8 rounded-xl bg-amber-500/10 text-amber-500 flex items-center justify-center border border-amber-500/20">
+              <Sun size={16} />
             </div>
             <div>
-              <div className="text-xs font-bold text-primary">Тёмное оформление</div>
+              <div className="text-xs font-bold text-primary flex items-center gap-1.5">
+                <span>Тёмное оформление</span>
+                <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-slate-200 text-slate-500 font-semibold">Недоступно</span>
+              </div>
               <div className="text-[11px] text-muted">
-                {isDark ? 'Тёмная тема активна' : 'Светлая тема активна'}
+                Переход на тёмную тему временно недоступен
               </div>
             </div>
           </div>
           <button
-            onClick={onToggleDarkMode}
-            className={`w-10 h-6 rounded-full transition-colors relative p-0.5 ${
-              isDark ? 'bg-blue-500' : 'bg-slate-300 dark:bg-slate-700'
-            }`}
+            disabled
+            onClick={() => {
+              setToastMessage('Переход на тёмную тему пока недоступен');
+              setTimeout(() => setToastMessage(null), 3000);
+            }}
+            className="w-10 h-6 rounded-full transition-colors relative p-0.5 bg-slate-300 cursor-not-allowed opacity-60"
+            title="Тёмное оформление временно недоступно"
           >
-            <div
-              className={`w-5 h-5 rounded-full bg-white shadow-sm transition-transform ${
-                isDark ? 'translate-x-4' : 'translate-x-0'
-              }`}
-            />
+            <div className="w-5 h-5 rounded-full bg-white shadow-sm transition-transform translate-x-0" />
           </button>
         </div>
 
