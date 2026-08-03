@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../../services/api';
+import { cacheService } from '../../services/cacheService';
 import { User } from '../../types';
 import { validateNickname } from '../../utils/validation';
 import {
@@ -278,6 +279,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
           return;
         }
 
+        cacheService.clearAllCache();
         onSuccess(loggedInUser);
         handleClose();
       } catch (err: any) {
@@ -416,6 +418,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
         language: platformLanguage,
       });
 
+      cacheService.clearAllCache();
       onSuccess(res.user);
       handleClose();
     } catch (err: any) {

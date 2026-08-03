@@ -20,8 +20,14 @@ import {
   CheckCheck,
   ExternalLink,
   MousePointerClick,
+  Edit2,
+  Lock,
+  Shield,
+  EyeOff,
+  FolderKanban,
+  UserPlus,
 } from 'lucide-react';
-import { Contact, NewsItem, TabType, SystemAnnouncement, Story, User } from '../../types';
+import { Contact, NewsItem, TabType, SystemAnnouncement, Story, User, ChatFolder } from '../../types';
 import { api } from '../../services/api';
 import { socketService } from '../../services/socket';
 import { ContactSyncModal } from '../Contacts/ContactSyncModal';
@@ -29,11 +35,6 @@ import { StoryViewer } from '../Feed/StoryViewer';
 import { StoryCreatorModal } from '../Feed/StoryCreatorModal';
 import { useLanguage } from '../../context/LanguageContext';
 
-interface ChatFolder {
-  id: string;
-  name: string; // max 8 chars
-  contactIds: string[];
-}
 
 interface HomeScreenProps {
   contacts: Contact[];
@@ -45,12 +46,12 @@ interface HomeScreenProps {
   onRefreshContacts?: () => void;
   currentUser?: User | null;
   onOpenUserProfile?: (userId: string) => void;
+  onOpenAuth?: () => void;
 }
 
 const aiQuickActions = [
-  { icon: FileText, label: 'Суммаризация' },
-  { icon: Languages, label: 'Перевод текста' },
-  { icon: TrendingUp, label: 'Анализ портфеля' },
+  { icon: Languages, label: 'Перевод текста', action: 'translate' },
+  { icon: TrendingUp, label: 'Анализ портфеля', action: 'portfolio', disabled: true },
 ];
 
 function useDraggableScroll() {
@@ -114,11 +115,20 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   onRefreshContacts,
   currentUser,
   onOpenUserProfile,
+  onOpenAuth,
 }) => {
   const [feedCollapsed, setFeedCollapsed] = useState(false);
   const [showSearchModal, setShowSearchModal] = useState(false);
   const [aiPrompt, setAiPrompt] = useState('');
   const [announcements, setAnnouncements] = useState<SystemAnnouncement[]>([]);
+
+  // Folder Manager Modal State
+  const [showFolderManagerModal, setShowFolderManagerModal] = useState(false);
+  const [folderManagerMode, setFolderManagerMode] = useState<'list' | 'create' | 'edit'>('list');
+  const [editingFolder, setEditingFolder] = useState<ChatFolder | null>(null);
+  const [folderFormName, setFolderFormName] = useState('');
+  const [folderFormContactIds, setFolderFormContactIds] = useState<string[]>([]);
+  const [folderContactSearch, setFolderContactSearch] = useState('');
 
   // Stories State with instant localStorage cache
   const [stories, setStories] = useState<Story[]>(() => {
@@ -215,11 +225,55 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
     }
   });
 
+  const [categorizeToast, setCategorizeToast] = useState<string | null>(null);
+
+  // Folder Categorization Mode
+  const [folderMode, setFolderMode] = useState<'manual' | 'auto'>(() => {
+    const key = currentUser ? `orbit_folder_mode_${currentUser.email}` : 'orbit_folder_mode_guest';
+    return (localStorage.getItem(key) as 'manual' | 'auto') || 'manual';
+  });
+
+  const [showFolderModeModal, setShowFolderModeModal] = useState(false);
+
+  // Hidden from "Все" contact IDs
+  const [hiddenFromAllIds, setHiddenFromAllIds] = useState<string[]>(() => {
+    const key = currentUser ? `orbit_hidden_from_all_${currentUser.email}` : 'orbit_hidden_from_all_guest';
+    try {
+      const saved = localStorage.getItem(key);
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+
+  const saveHiddenFromAllIds = (ids: string[]) => {
+    setHiddenFromAllIds(ids);
+    const key = currentUser ? `orbit_hidden_from_all_${currentUser.email}` : 'orbit_hidden_from_all_guest';
+    try {
+      localStorage.setItem(key, JSON.stringify(ids));
+    } catch {}
+  };
+
+  const handleSetFolderMode = (mode: 'manual' | 'auto') => {
+    setFolderMode(mode);
+    const key = currentUser ? `orbit_folder_mode_${currentUser.email}` : 'orbit_folder_mode_guest';
+    localStorage.setItem(key, mode);
+    setShowFolderModeModal(false);
+
+    if (mode === 'auto') {
+      handleAutoCategorize();
+      setCategorizeToast('Режим: Автоматическое распределение');
+    } else {
+      setCategorizeToast('Режим: Ручное распределение');
+    }
+    setTimeout(() => setCategorizeToast(null), 2500);
+  };
+
   // Folder & Pinning State
   const [folders, setFolders] = useState<ChatFolder[]>(() => {
-    if (!currentUser) return [];
+    const storageKey = currentUser ? `orbit_chat_folders_${currentUser.email}` : 'orbit_chat_folders_guest';
     try {
-      const saved = localStorage.getItem(`orbit_chat_folders_${currentUser.email}`);
+      const saved = localStorage.getItem(storageKey);
       return saved ? JSON.parse(saved) : [];
     } catch {
       return [];
@@ -227,17 +281,31 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   });
 
   useEffect(() => {
-    if (!currentUser) {
-      setFolders([]);
-      return;
-    }
+    const storageKey = currentUser ? `orbit_chat_folders_${currentUser.email}` : 'orbit_chat_folders_guest';
     try {
-      const saved = localStorage.getItem(`orbit_chat_folders_${currentUser.email}`);
+      const saved = localStorage.getItem(storageKey);
       setFolders(saved ? JSON.parse(saved) : []);
     } catch {
       setFolders([]);
     }
+    const modeKey = currentUser ? `orbit_folder_mode_${currentUser.email}` : 'orbit_folder_mode_guest';
+    setFolderMode((localStorage.getItem(modeKey) as 'manual' | 'auto') || 'manual');
+    const hiddenKey = currentUser ? `orbit_hidden_from_all_${currentUser.email}` : 'orbit_hidden_from_all_guest';
+    try {
+      const savedHidden = localStorage.getItem(hiddenKey);
+      setHiddenFromAllIds(savedHidden ? JSON.parse(savedHidden) : []);
+    } catch {
+      setHiddenFromAllIds([]);
+    }
   }, [currentUser?.email]);
+
+  useEffect(() => {
+    const allFolderContactIds = new Set(folders.flatMap((f) => f.contactIds));
+    const nextHidden = hiddenFromAllIds.filter((id) => allFolderContactIds.has(id));
+    if (nextHidden.length !== hiddenFromAllIds.length) {
+      saveHiddenFromAllIds(nextHidden);
+    }
+  }, [folders]);
 
   const [pinnedContactIds, setPinnedContactIds] = useState<string[]>(() => {
     try {
@@ -343,12 +411,85 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   const saveFolders = (newFolders: ChatFolder[]) => {
     const nonFolderAll = newFolders.filter((f) => f.contactIds.length > 0);
     setFolders(nonFolderAll);
-    if (!currentUser) return;
+    const storageKey = currentUser ? `orbit_chat_folders_${currentUser.email}` : 'orbit_chat_folders_guest';
     try {
-      localStorage.setItem(`orbit_chat_folders_${currentUser.email}`, JSON.stringify(nonFolderAll));
+      localStorage.setItem(storageKey, JSON.stringify(nonFolderAll));
     } catch {
       // Ignore
     }
+  };
+
+  const handleAutoCategorize = () => {
+    const allContacts = combinedContacts;
+    if (allContacts.length === 0) {
+      setCategorizeToast('Нет активных диалогов для группировки');
+      setTimeout(() => setCategorizeToast(null), 2500);
+      return;
+    }
+
+    const financeKeywords = [
+      'wallet', 'кошелек', 'кошелёк', 'банк', 'bank', 'finance', 'финансы', 'crypto', 'крипта',
+      'pay', 'оплата', 'rub', 'usd', 'eur', 'usdt', 'ton', 'btc', 'перевод', 'transfer', 'счет',
+      'счёт', 'налог', 'bounty', 'trade', 'трейд', 'инвест', 'invest', 'акции', 'stock', 'обмен',
+      'деньги', 'касса', 'cash', 'money', 'баллы', 'кошелёк'
+    ];
+
+    const workKeywords = [
+      'work', 'работа', 'рабочи', 'project', 'проект', 'team', 'команда', 'boss', 'начальник',
+      'dev', 'разраб', 'разработка', 'lead', 'офис', 'office', 'hr', 'отдел', 'company', 'компания',
+      'support', 'поддержка', 'менеджер', 'manager', 'клиент', 'client', 'совещание', 'meeting',
+      'задача', 'task', 'jira', 'doc', 'отчет', 'отчёт', 'biz', 'бизнес', 'партнер', 'коллега',
+      'канал', 'channel', 'группа', 'group', 'сообщество', 'новости', 'news', 'b2b', 'it', 'дизайн'
+    ];
+
+    const financeIds: string[] = [];
+    const workIds: string[] = [];
+    const personalIds: string[] = [];
+
+    allContacts.forEach((c) => {
+      const textToMatch = `${c.name || ''} ${c.last || ''} ${c.handle || ''} ${c.description || ''} ${c.category || ''}`.toLowerCase();
+
+      const isFinance = financeKeywords.some((kw) => textToMatch.includes(kw));
+      if (isFinance) {
+        financeIds.push(c.id);
+        return;
+      }
+
+      const isWork = Boolean(c.isChannelGroup) || workKeywords.some((kw) => textToMatch.includes(kw));
+      if (isWork) {
+        workIds.push(c.id);
+        return;
+      }
+
+      personalIds.push(c.id);
+    });
+
+    // Keep existing custom folders that are not Personal/Work/Finance
+    const existingCustomFolders = folders.filter(
+      (f) =>
+        f.id !== 'folder_personal' &&
+        f.id !== 'folder_work' &&
+        f.id !== 'folder_finance' &&
+        !['Personal', 'Work', 'Finance', 'Личные', 'Работа', 'Финансы'].includes(f.name)
+    );
+
+    const autoFolders: ChatFolder[] = [];
+    if (personalIds.length > 0) {
+      autoFolders.push({ id: 'folder_personal', name: 'Personal', contactIds: personalIds });
+    }
+    if (workIds.length > 0) {
+      autoFolders.push({ id: 'folder_work', name: 'Work', contactIds: workIds });
+    }
+    if (financeIds.length > 0) {
+      autoFolders.push({ id: 'folder_finance', name: 'Finance', contactIds: financeIds });
+    }
+
+    const updatedFolders = [...autoFolders, ...existingCustomFolders];
+    saveFolders(updatedFolders);
+    setActiveFolderId('all');
+
+    setCategorizeToast(`Чаты распределены по категориям: Personal, Work, Finance`);
+    setTimeout(() => setCategorizeToast(null), 3000);
   };
 
   const savePinnedContacts = (newPinned: string[]) => {
@@ -416,6 +557,75 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
     setContextMenuContact(null);
   };
 
+  const openCreateFolderManager = () => {
+    if (!currentUser) {
+      onOpenAuth?.();
+      return;
+    }
+    setEditingFolder(null);
+    setFolderFormName('');
+    setFolderFormContactIds([]);
+    setFolderContactSearch('');
+    setFolderManagerMode('create');
+    setShowFolderManagerModal(true);
+  };
+
+  const openEditFolderManager = (folder: ChatFolder, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    if (!currentUser) {
+      onOpenAuth?.();
+      return;
+    }
+    setEditingFolder(folder);
+    setFolderFormName(folder.name);
+    setFolderFormContactIds([...folder.contactIds]);
+    setFolderContactSearch('');
+    setFolderManagerMode('edit');
+    setShowFolderManagerModal(true);
+  };
+
+  const handleSaveFolderManager = () => {
+    const trimmed = folderFormName.trim().slice(0, 12);
+    if (!trimmed) return;
+
+    if (folderManagerMode === 'create') {
+      if (folders.length >= 10) {
+        alert('Максимальное количество папок — 10');
+        return;
+      }
+      const newFolder: ChatFolder = {
+        id: `folder_${Date.now()}`,
+        name: trimmed,
+        contactIds: folderFormContactIds,
+      };
+      saveFolders([...folders, newFolder]);
+    } else if (folderManagerMode === 'edit' && editingFolder) {
+      const updated = folders.map((f) =>
+        f.id === editingFolder.id ? { ...f, name: trimmed, contactIds: folderFormContactIds } : f
+      );
+      saveFolders(updated);
+    }
+
+    setFolderManagerMode('list');
+  };
+
+  const handleDeleteFolder = (folderId: string, e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    const updated = folders.filter((f) => f.id !== folderId);
+    saveFolders(updated);
+    if (activeFolderId === folderId) {
+      setActiveFolderId('all');
+    }
+  };
+
+  const toggleContactInFolderForm = (contactId: string) => {
+    if (folderFormContactIds.includes(contactId)) {
+      setFolderFormContactIds(folderFormContactIds.filter((id) => id !== contactId));
+    } else {
+      setFolderFormContactIds([...folderFormContactIds, contactId]);
+    }
+  };
+
   // Map Channel/Group items to Contact format
   const cgContacts: Contact[] = channelsGroups.map((cg) => ({
     id: cg.id,
@@ -436,20 +646,22 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
     description: cg.description,
   }));
 
-  // Filter and sort contacts with deduplication
-  const combinedContacts = [...contacts, ...cgContacts];
+  // Filter and sort contacts with deduplication (Empty if guest mode)
+  const combinedContacts = currentUser ? [...contacts, ...cgContacts] : [];
   const uniqueContactsMap = new Map<string, Contact>();
   combinedContacts.forEach((c) => uniqueContactsMap.set(c.id, c));
-  let displayedContacts = Array.from(uniqueContactsMap.values());
+  let displayedContacts = currentUser ? Array.from(uniqueContactsMap.values()) : [];
 
-  if (activeFolderId !== 'all') {
+  if (currentUser && activeFolderId === 'all') {
+    displayedContacts = displayedContacts.filter((c) => !hiddenFromAllIds.includes(c.id));
+  } else if (currentUser && activeFolderId !== 'all') {
     const activeFolder = folders.find((f) => f.id === activeFolderId);
     if (activeFolder) {
       displayedContacts = displayedContacts.filter((c) => activeFolder.contactIds.includes(c.id));
     }
   }
 
-  if (chatSearchQuery.trim()) {
+  if (currentUser && chatSearchQuery.trim()) {
     const q = chatSearchQuery.toLowerCase().trim();
     displayedContacts = displayedContacts.filter(
       (c) => c.name.toLowerCase().includes(q) || c.last?.toLowerCase().includes(q)
@@ -531,11 +743,22 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
           {aiQuickActions.map((a) => (
             <button
               key={a.label}
-              onClick={() => (onAskAI ? onAskAI('', a.label.toLowerCase()) : setTab('ai'))}
-              className="glass-button flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-full px-3.5 py-2 text-xs font-medium active:scale-95 transition"
+              onClick={() => {
+                if (a.disabled) {
+                  if (onAskAI) onAskAI('', 'portfolio');
+                  else setTab('ai');
+                  return;
+                }
+                if (onAskAI) onAskAI('', a.action);
+                else setTab('ai');
+              }}
+              className={`glass-button flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-full px-3.5 py-2 text-xs font-medium transition ${
+                a.disabled ? 'opacity-50 cursor-not-allowed' : 'active:scale-95'
+              }`}
             >
-              <a.icon size={14} className="text-blue-500" />
+              <a.icon size={14} className={a.disabled ? 'text-slate-400' : 'text-blue-500'} />
               <span>{a.label}</span>
+              {a.disabled && <span className="text-[10px] text-slate-400 ml-1">(недоступно)</span>}
             </button>
           ))}
         </div>
@@ -610,56 +833,89 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
         })}
 
       {/* Dialogs / Chats section */}
-      <div className="flex-1 min-h-0 flex flex-col">
-        {/* Folders Row with Pinned Plus Button on the Right (Only for Logged-In Users) */}
+      <div className="flex-1 min-h-0 flex flex-col relative">
+        {/* Categorize Toast Notification */}
+        {categorizeToast && (
+          <div className="absolute -top-9 left-1/2 -translate-x-1/2 z-30 px-3.5 py-1.5 rounded-full bg-slate-900/90 dark:bg-white/95 text-white dark:text-slate-900 text-xs font-semibold shadow-xl border border-white/20 dark:border-slate-800 animate-fade-in whitespace-nowrap">
+            {categorizeToast}
+          </div>
+        )}
+
+        {/* Folders Row with Categorize & Action Buttons (Only shown for logged-in users) */}
         {currentUser && (
           <div className="flex items-center justify-between gap-2 mb-2 shrink-0 relative">
             <div
               ref={folderScrollRef}
-              className="flex-1 flex gap-2 overflow-x-auto no-scrollbar touch-pan-x cursor-grab active:cursor-grabbing select-none py-0.5 pr-2"
+              className="flex-1 flex gap-1.5 overflow-x-auto no-scrollbar touch-pan-x cursor-grab active:cursor-grabbing select-none py-0.5 pr-2"
             >
               <button
                 onClick={() => setActiveFolderId('all')}
-                className={`px-3.5 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap transition active:scale-95 shrink-0 ${
+                onContextMenu={(e) => {
+                  e.preventDefault();
+                  setShowFolderModeModal(true);
+                }}
+                onTouchStart={(e) => {
+                  const timer = setTimeout(() => setShowFolderModeModal(true), 500);
+                  (e.currentTarget as any)._lpTimer = timer;
+                }}
+                onTouchEnd={(e) => {
+                  if ((e.currentTarget as any)._lpTimer) clearTimeout((e.currentTarget as any)._lpTimer);
+                }}
+                onTouchMove={(e) => {
+                  if ((e.currentTarget as any)._lpTimer) clearTimeout((e.currentTarget as any)._lpTimer);
+                }}
+                onMouseDown={(e) => {
+                  const timer = setTimeout(() => setShowFolderModeModal(true), 500);
+                  (e.currentTarget as any)._lpTimer = timer;
+                }}
+                onMouseUp={(e) => {
+                  if ((e.currentTarget as any)._lpTimer) clearTimeout((e.currentTarget as any)._lpTimer);
+                }}
+                onMouseLeave={(e) => {
+                  if ((e.currentTarget as any)._lpTimer) clearTimeout((e.currentTarget as any)._lpTimer);
+                }}
+                className={`px-3.5 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap transition active:scale-95 shrink-0 flex items-center gap-1 ${
                   activeFolderId === 'all'
                     ? 'bg-sky-500 text-white shadow-md shadow-sky-500/20'
                     : 'glass-button text-slate-700 dark:text-slate-300'
                 }`}
+                title="Зажмите для выбора режима (Ручной / Авто)"
               >
-                Все
+                <span>Все</span>
               </button>
               {folders.map((f) => (
-                <button
-                  key={f.id}
-                  onClick={() => setActiveFolderId(f.id)}
-                  className={`px-3.5 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap flex items-center gap-1.5 transition active:scale-95 shrink-0 ${
-                    activeFolderId === f.id
-                      ? 'bg-sky-500 text-white shadow-md shadow-sky-500/20'
-                      : 'glass-button text-slate-700 dark:text-slate-300'
-                  }`}
-                >
-                  <Folder size={12} />
-                  <span>{f.name}</span>
-                  <span className="text-[10px] opacity-75">({f.contactIds.length})</span>
-                </button>
+                <div key={f.id} className="shrink-0 flex items-center group">
+                  <button
+                    onClick={() => setActiveFolderId(f.id)}
+                    className={`px-3.5 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap flex items-center gap-1.5 transition active:scale-95 ${
+                      activeFolderId === f.id
+                        ? 'bg-sky-500 text-white shadow-md shadow-sky-500/20'
+                        : 'glass-button text-slate-700 dark:text-slate-300'
+                    }`}
+                  >
+                    <Folder size={12} />
+                    <span>{f.name}</span>
+                    <span className="text-[10px] opacity-75">({f.contactIds.length})</span>
+                    {activeFolderId === f.id && (
+                      <span
+                        onClick={(e) => openEditFolderManager(f, e)}
+                        className="ml-0.5 p-0.5 rounded-full hover:bg-white/20 transition cursor-pointer"
+                        title="Настроить папку"
+                      >
+                        <Edit2 size={11} />
+                      </span>
+                    )}
+                  </button>
+                </div>
               ))}
             </div>
 
-            {/* Plus buttons inline on the right */}
+            {/* Buttons inline on the right */}
             <div className="flex items-center gap-1.5 shrink-0 z-10">
-              <button
-                onClick={() => setShowCreateCGModal(true)}
-                className="px-2.5 py-1.5 rounded-full bg-sky-500 hover:bg-sky-400 text-white flex items-center gap-1 text-[11px] font-bold shadow-xs active:scale-95 transition"
-                title="Создать канал или группу"
-              >
-                <Plus size={13} strokeWidth={2.5} />
-                <span>Канал / Группа</span>
-              </button>
-
               <button
                 onClick={() => setShowSearchModal(true)}
                 className="h-8 w-8 rounded-full bg-white dark:bg-slate-800 text-slate-800 dark:text-white border border-slate-200/80 dark:border-slate-700/80 flex items-center justify-center shrink-0 shadow-sm hover:bg-slate-50 dark:hover:bg-slate-700 active:scale-95 transition"
-                title="Добавить контакт"
+                title="Контакты, группы, каналы"
               >
                 <Plus size={16} />
               </button>
@@ -741,7 +997,20 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
             <div className="w-8 h-1 bg-slate-300 dark:bg-slate-700 rounded-full group-hover:bg-sky-500 transition" />
             {isPullSearchOpen && <span className="text-[10px] text-sky-500 font-semibold">Скрыть поиск</span>}
           </div>
-          {sortedContacts.length === 0 ? (
+
+          {!currentUser ? (
+            <div className="text-center p-6 my-auto flex flex-col items-center justify-center gap-3 self-center w-full max-w-xs animate-fade-in">
+              <p className="text-xs text-slate-500 dark:text-slate-400 font-medium leading-relaxed">
+                Войдите в аккаунт для просмотра диалогов и общения
+              </p>
+              <button
+                onClick={() => onOpenAuth?.()}
+                className="px-5 py-2 rounded-xl bg-sky-500 hover:bg-sky-600 text-white font-bold text-xs shadow-md shadow-sky-500/20 active:scale-95 transition"
+              >
+                Войти в аккаунт
+              </button>
+            </div>
+          ) : sortedContacts.length === 0 ? (
             <div className="text-center text-xs text-muted p-6 my-auto flex flex-col items-center justify-center gap-2 self-center w-full">
               <Users size={32} className="text-slate-300 dark:text-slate-600 mb-1" />
               <span className="font-medium max-w-xs leading-relaxed text-secondary">
@@ -870,21 +1139,36 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
               </button>
             )}
 
-            {activeFolderId !== 'all' ? (
+            <button
+              onClick={() => setShowFolderModal(true)}
+              className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-2xl hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 font-medium transition"
+            >
+              <FolderPlus size={15} className="text-emerald-500" />
+              <span>Управление папками</span>
+            </button>
+
+            {folders.some((f) => f.contactIds.includes(contextMenuContact.id)) && (
               <button
-                onClick={() => handleRemoveFromFolder(activeFolderId, contextMenuContact.id)}
-                className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-2xl hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 font-medium transition"
+                onClick={() => {
+                  const isHidden = hiddenFromAllIds.includes(contextMenuContact.id);
+                  if (isHidden) {
+                    saveHiddenFromAllIds(hiddenFromAllIds.filter((id) => id !== contextMenuContact.id));
+                    setCategorizeToast('Диалог возвращен в папку «Все»');
+                  } else {
+                    saveHiddenFromAllIds([...hiddenFromAllIds, contextMenuContact.id]);
+                    setCategorizeToast('Диалог скрыт из папки «Все»');
+                  }
+                  setTimeout(() => setCategorizeToast(null), 2500);
+                  setContextMenuContact(null);
+                }}
+                className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-2xl hover:bg-slate-100 dark:hover:bg-slate-800 text-sky-600 dark:text-sky-400 font-medium transition"
               >
-                <FolderMinus size={15} className="text-amber-500" />
-                <span>Убрать из папки</span>
-              </button>
-            ) : (
-              <button
-                onClick={() => setShowFolderModal(true)}
-                className="w-full flex items-center gap-2.5 px-3 py-2.5 rounded-2xl hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-200 font-medium transition"
-              >
-                <FolderPlus size={15} className="text-emerald-500" />
-                <span>В папку</span>
+                <EyeOff size={15} />
+                <span>
+                  {hiddenFromAllIds.includes(contextMenuContact.id)
+                    ? 'Показывать в папке «Все»'
+                    : 'Скрыть из папки «Все»'}
+                </span>
               </button>
             )}
 
@@ -918,21 +1202,32 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
             <button
               onClick={async () => {
                 if (contextMenuContact) {
-                  const isCg = contextMenuContact.id.startsWith('cg_');
+                  const targetId = contextMenuContact.id;
+                  const isCg = targetId.startsWith('cg_');
                   if (isCg) {
                     try {
-                      await api.deleteChannelGroup(contextMenuContact.id);
-                      onRefreshContacts();
-                      loadChannelsGroups();
-                    } catch (err: any) {
-                      alert(err.message || 'Ошибка при удалении');
+                      await api.deleteChannelGroup(targetId);
+                    } catch {
+                      try {
+                        await api.leaveChannelGroup(targetId);
+                      } catch (err: any) {
+                        alert(err.message || 'Ошибка при удалении');
+                      }
                     }
+                    loadChannelsGroups();
                   } else {
                     try {
-                      await api.removeContact(contextMenuContact.id);
-                      onRefreshContacts();
-                    } catch {}
+                      await api.removeContact(targetId);
+                    } catch (err: any) {
+                      alert(err.message || 'Ошибка удаления чата');
+                    }
                   }
+                  const updatedFolders = folders.map((f) => ({
+                    ...f,
+                    contactIds: f.contactIds.filter((id) => id !== targetId),
+                  }));
+                  saveFolders(updatedFolders);
+                  onRefreshContacts();
                 }
                 setContextMenuContact(null);
               }}
@@ -967,21 +1262,36 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
 
             {/* Existing Folders List */}
             {folders.length > 0 && (
-              <div className="space-y-1 max-h-36 overflow-y-auto no-scrollbar">
-                <span className="text-[10px] font-semibold uppercase text-slate-400">Выберите папку:</span>
-                {folders.map((f) => (
-                  <button
-                    key={f.id}
-                    onClick={() => handleAddToExistingFolder(f.id)}
-                    className="w-full flex items-center justify-between px-3 py-2 rounded-xl bg-slate-50 dark:bg-slate-800/60 hover:bg-sky-500/10 text-slate-700 dark:text-slate-200 font-medium transition"
-                  >
-                    <div className="flex items-center gap-2">
-                      <Folder size={14} className="text-sky-500" />
-                      <span>{f.name}</span>
-                    </div>
-                    <ChevronRight size={13} className="text-slate-400" />
-                  </button>
-                ))}
+              <div className="space-y-1.5 max-h-48 overflow-y-auto no-scrollbar">
+                <span className="text-[10px] font-semibold uppercase text-slate-400 block mb-1">Выберите папки для диалога:</span>
+                {folders.map((f) => {
+                  const isInFolder = f.contactIds.includes(contextMenuContact.id);
+                  return (
+                    <button
+                      key={f.id}
+                      onClick={() => {
+                        if (isInFolder) {
+                          handleRemoveFromFolder(f.id, contextMenuContact.id);
+                        } else {
+                          handleAddToExistingFolder(f.id);
+                        }
+                      }}
+                      className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl border transition ${
+                        isInFolder
+                          ? 'bg-sky-500/10 border-sky-500/40 text-sky-900 dark:text-sky-100 font-bold'
+                          : 'bg-slate-50 dark:bg-slate-800/60 border-transparent hover:border-slate-300 text-slate-700 dark:text-slate-200'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2">
+                        <Folder size={14} className={isInFolder ? 'text-sky-500' : 'text-slate-400'} />
+                        <span>{f.name}</span>
+                      </div>
+                      <div className={`h-4 w-4 rounded-md flex items-center justify-center border ${isInFolder ? 'bg-sky-500 border-sky-500 text-white' : 'border-slate-300 dark:border-slate-600'}`}>
+                        {isInFolder && <Check size={10} strokeWidth={3} />}
+                      </div>
+                    </button>
+                  );
+                })}
               </div>
             )}
 
@@ -1008,6 +1318,72 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
                 </div>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Folder Categorization Mode Selection Modal */}
+      {showFolderModeModal && (
+        <div
+          className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4 animate-fade-in"
+          onClick={() => setShowFolderModeModal(false)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-sm rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl p-5 space-y-4 animate-scale-up"
+          >
+            <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <Sparkles className="text-amber-500" size={18} />
+                <h3 className="font-bold text-sm text-slate-800 dark:text-white">Режим папок и категорий</h3>
+              </div>
+              <button
+                onClick={() => setShowFolderModeModal(false)}
+                className="p-1 rounded-full text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div
+                onClick={() => handleSetFolderMode('manual')}
+                className={`p-3.5 rounded-2xl border cursor-pointer transition flex items-start gap-3 ${
+                  folderMode === 'manual'
+                    ? 'bg-sky-500/10 border-sky-500 text-sky-900 dark:text-sky-100'
+                    : 'bg-slate-50 dark:bg-slate-800/50 border-slate-200 dark:border-slate-700 hover:border-slate-300'
+                }`}
+              >
+                <div className={`mt-0.5 h-4 w-4 rounded-full border flex items-center justify-center shrink-0 ${folderMode === 'manual' ? 'border-sky-500 bg-sky-500 text-white' : 'border-slate-400'}`}>
+                  {folderMode === 'manual' && <Check size={10} strokeWidth={3} />}
+                </div>
+                <div>
+                  <div className="font-bold text-slate-800 dark:text-white mb-0.5">Распределять вручную (по умолчанию)</div>
+                  <div className="text-[11px] text-slate-500 dark:text-slate-400 leading-snug">
+                    Диалоги автоматически не распределяются. Вы сами зажимаете диалог и добавляете его в нужные категории.
+                  </div>
+                </div>
+              </div>
+
+              <div
+                onClick={() => handleSetFolderMode('auto')}
+                className={`p-3.5 rounded-2xl border cursor-pointer transition flex items-start gap-3 ${
+                  folderMode === 'auto'
+                    ? 'bg-sky-500/10 border-sky-500 text-sky-900 dark:text-sky-100'
+                    : 'bg-slate-50 dark:bg-slate-800/50 border-slate-200 dark:border-slate-700 hover:border-slate-300'
+                }`}
+              >
+                <div className={`mt-0.5 h-4 w-4 rounded-full border flex items-center justify-center shrink-0 ${folderMode === 'auto' ? 'border-sky-500 bg-sky-500 text-white' : 'border-slate-400'}`}>
+                  {folderMode === 'auto' && <Check size={10} strokeWidth={3} />}
+                </div>
+                <div>
+                  <div className="font-bold text-slate-800 dark:text-white mb-0.5">Распределять автоматически</div>
+                  <div className="text-[11px] text-slate-500 dark:text-slate-400 leading-snug">
+                    Диалоги автоматически распределяются по папкам Personal, Work, Finance на основе названия и контактов.
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       )}
@@ -1161,12 +1537,236 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
         </div>
       )}
 
+      {/* Folder Manager Modal (Create, Edit & List custom folders) */}
+      {showFolderManagerModal && (
+        <div
+          className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4 animate-fade-in"
+          onClick={() => setShowFolderManagerModal(false)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-sm rounded-3xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl p-5 space-y-4 text-xs animate-scale-up max-h-[85vh] flex flex-col"
+          >
+            {/* Modal Header */}
+            <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3 shrink-0">
+              <div className="flex items-center gap-2">
+                <FolderPlus className="text-sky-500" size={18} />
+                <h3 className="font-bold text-sm text-slate-800 dark:text-white">
+                  {folderManagerMode === 'list' && 'Управление папками'}
+                  {folderManagerMode === 'create' && 'Создать новую папку'}
+                  {folderManagerMode === 'edit' && 'Редактировать папку'}
+                </h3>
+              </div>
+              <button
+                onClick={() => setShowFolderManagerModal(false)}
+                className="p-1 rounded-full text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Folder List View */}
+            {folderManagerMode === 'list' && (
+              <div className="flex-1 min-h-0 flex flex-col space-y-3">
+                <div className="flex items-center justify-between text-slate-500 dark:text-slate-400 text-[11px] font-medium">
+                  <span>Ваши папки: {folders.length} / 10</span>
+                  <span className="text-slate-400">Группируйте чаты по темам</span>
+                </div>
+
+                <div className="flex-1 min-h-0 overflow-y-auto no-scrollbar space-y-2 pr-0.5">
+                  {folders.length === 0 ? (
+                    <div className="py-8 text-center text-slate-400 flex flex-col items-center justify-center gap-2">
+                      <Folder size={32} className="text-slate-300 dark:text-slate-700" />
+                      <p className="text-xs">У вас пока нет созданных папок</p>
+                    </div>
+                  ) : (
+                    folders.map((f) => (
+                      <div
+                        key={f.id}
+                        className="flex items-center justify-between p-3 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200/60 dark:border-slate-700/60 hover:border-sky-500/30 transition"
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <div className="h-9 w-9 rounded-xl bg-sky-500/10 text-sky-500 flex items-center justify-center shrink-0">
+                            <Folder size={18} />
+                          </div>
+                          <div className="min-w-0">
+                            <h4 className="font-bold text-slate-800 dark:text-slate-100 truncate text-xs">
+                              {f.name}
+                            </h4>
+                            <p className="text-[10px] text-slate-400">
+                              {f.contactIds.length} {f.contactIds.length === 1 ? 'диалог' : 'диалогов'}
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-1 shrink-0">
+                          <button
+                            onClick={() => openEditFolderManager(f)}
+                            className="p-1.5 rounded-xl text-slate-500 hover:text-sky-500 hover:bg-sky-500/10 transition"
+                            title="Редактировать папку"
+                          >
+                            <Edit2 size={14} />
+                          </button>
+                          <button
+                            onClick={(e) => handleDeleteFolder(f.id, e)}
+                            className="p-1.5 rounded-xl text-slate-400 hover:text-red-500 hover:bg-red-500/10 transition"
+                            title="Удалить папку"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                <p className="text-[11px] text-slate-400 text-center py-1">
+                  Чтобы создать новую папку, зажмите нужный диалог в списке чатов
+                </p>
+              </div>
+            )}
+
+            {/* Create / Edit Folder Form View */}
+            {(folderManagerMode === 'create' || folderManagerMode === 'edit') && (
+              <div className="flex-1 min-h-0 flex flex-col space-y-3">
+                {/* Folder Name Input */}
+                <div>
+                  <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">
+                    Название папки (макс 12 симв)
+                  </label>
+                  <input
+                    type="text"
+                    maxLength={12}
+                    value={folderFormName}
+                    onChange={(e) => setFolderFormName(e.target.value)}
+                    placeholder="Например: Работа, Проекты, Личные"
+                    className="w-full px-3.5 py-2.5 rounded-2xl bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs font-medium text-slate-800 dark:text-white placeholder:text-slate-400 outline-none focus:border-sky-500 transition"
+                    autoFocus
+                  />
+                </div>
+
+                {/* Contact Selection for Folder */}
+                <div className="flex-1 min-h-0 flex flex-col space-y-2">
+                  <div className="flex items-center justify-between text-[11px] font-bold text-slate-500 dark:text-slate-400 uppercase tracking-wider">
+                    <span>Выберите чаты ({folderFormContactIds.length}):</span>
+                    {folderFormContactIds.length > 0 && (
+                      <button
+                        onClick={() => setFolderFormContactIds([])}
+                        className="text-sky-500 hover:underline capitalize text-[10px]"
+                      >
+                        Сбросить
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Search inside contact selector */}
+                  <div className="relative shrink-0">
+                    <Search size={14} className="absolute left-3 top-2.5 text-slate-400" />
+                    <input
+                      type="text"
+                      value={folderContactSearch}
+                      onChange={(e) => setFolderContactSearch(e.target.value)}
+                      placeholder="Поиск диалогов..."
+                      className="w-full pl-8 pr-3 py-2 rounded-xl bg-slate-100 dark:bg-slate-800/80 border border-slate-200/80 dark:border-slate-700/80 text-xs text-slate-800 dark:text-white placeholder:text-slate-400 outline-none"
+                    />
+                  </div>
+
+                  {/* Contacts List with Checkboxes */}
+                  <div className="flex-1 min-h-0 overflow-y-auto no-scrollbar space-y-1.5 pr-0.5 border border-slate-100 dark:border-slate-800 rounded-2xl p-2 bg-slate-50/50 dark:bg-slate-900/50">
+                    {combinedContacts.length === 0 ? (
+                      <p className="py-6 text-center text-slate-400 text-xs">
+                        Нет доступных контактов для добавления
+                      </p>
+                    ) : (
+                      combinedContacts
+                        .filter((c) =>
+                          !folderContactSearch.trim()
+                            ? true
+                            : c.name.toLowerCase().includes(folderContactSearch.toLowerCase().trim())
+                        )
+                        .map((c) => {
+                          const isSelected = folderFormContactIds.includes(c.id);
+                          return (
+                            <div
+                              key={c.id}
+                              onClick={() => toggleContactInFolderForm(c.id)}
+                              className={`flex items-center justify-between p-2 rounded-xl cursor-pointer transition ${
+                                isSelected
+                                  ? 'bg-sky-500/10 border border-sky-500/30'
+                                  : 'hover:bg-slate-100 dark:hover:bg-slate-800 border border-transparent'
+                              }`}
+                            >
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <div
+                                  className={`h-8 w-8 rounded-full bg-gradient-to-br ${c.color} flex items-center justify-center text-white text-xs font-bold shrink-0`}
+                                >
+                                  {c.avatarUrl ? (
+                                    <img
+                                      src={c.avatarUrl}
+                                      alt={c.name}
+                                      className="h-full w-full rounded-full object-cover"
+                                    />
+                                  ) : (
+                                    c.initials
+                                  )}
+                                </div>
+                                <div className="min-w-0">
+                                  <p className="text-xs font-semibold text-slate-800 dark:text-slate-100 truncate">
+                                    {c.name}
+                                  </p>
+                                  <p className="text-[10px] text-slate-400 truncate">
+                                    {c.isChannelGroup ? (c.channelGroupType?.includes('channel') ? 'Канал' : 'Группа') : c.handle}
+                                  </p>
+                                </div>
+                              </div>
+
+                              <div
+                                className={`h-5 w-5 rounded-lg flex items-center justify-center border transition shrink-0 ${
+                                  isSelected
+                                    ? 'bg-sky-500 border-sky-500 text-white'
+                                    : 'border-slate-300 dark:border-slate-600'
+                                }`}
+                              >
+                                {isSelected && <Check size={12} strokeWidth={3} />}
+                              </div>
+                            </div>
+                          );
+                        })
+                    )}
+                  </div>
+                </div>
+
+                {/* Form Action Buttons */}
+                <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100 dark:border-slate-800 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setFolderManagerMode('list')}
+                    className="px-3.5 py-2 rounded-xl text-xs font-semibold text-slate-500 hover:text-slate-700 dark:hover:text-slate-200 transition"
+                  >
+                    Назад
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSaveFolderManager}
+                    disabled={!folderFormName.trim()}
+                    className="px-4 py-2 rounded-xl bg-sky-500 hover:bg-sky-600 disabled:opacity-50 text-white font-bold text-xs shadow-md shadow-sky-500/20 active:scale-95 transition"
+                  >
+                    {folderManagerMode === 'create' ? 'Создать папку' : 'Сохранить'}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Full Production Contact Sync Modal */}
       <ContactSyncModal
         isOpen={showSearchModal}
         onClose={() => setShowSearchModal(false)}
         onOpenChat={(contact) => openChat(contact)}
         onRefreshContacts={onRefreshContacts}
+        onCreateChannelGroup={() => setShowCreateCGModal(true)}
       />
     </div>
   );

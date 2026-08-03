@@ -406,14 +406,20 @@ export const StoryCreatorModal: React.FC<StoryCreatorModalProps> = ({
           {/* Form Controls */}
           <form onSubmit={handleSubmit} className="space-y-3.5 pt-2">
             <div>
-              <label className="block text-xs font-bold mb-1 text-slate-700 dark:text-slate-300">
-                Подпись к истории
-              </label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300">
+                  Подпись к истории
+                </label>
+                <span className={`text-[10px] font-mono ${caption.length >= 90 ? 'text-amber-500 font-bold' : 'text-slate-400'}`}>
+                  {caption.length}/100
+                </span>
+              </div>
               <input
                 type="text"
                 value={caption}
+                maxLength={100}
                 onChange={(e) => setCaption(e.target.value)}
-                placeholder="Добавьте описание или мысль..."
+                placeholder="Добавьте описание или мысль (макс. 100 символов)..."
                 className="w-full px-3.5 py-2.5 rounded-2xl text-xs font-medium border border-slate-200/80 dark:border-slate-800 bg-white/70 dark:bg-slate-950/70 text-slate-800 dark:text-slate-100 outline-none focus:ring-2 focus:ring-sky-500 placeholder:text-slate-400"
               />
             </div>

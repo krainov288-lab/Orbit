@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import { GoogleGenAI } from '@google/genai';
 import { db } from './db.js';
+import { AuthenticatedRequest } from './auth.js';
 
 let aiClient: GoogleGenAI | null = null;
 
@@ -24,25 +25,42 @@ function getAIClient(): GoogleGenAI {
 
 export async function aiChatHandler(req: Request, res: Response): Promise<void> {
   try {
-    const { message, context, action } = req.body;
+    const authReq = req as AuthenticatedRequest;
+    const { message, action, isTranslationMode } = req.body;
+
+    // Retrieve user name from database if authenticated
+    let userName = 'Пользователь';
+    if (authReq.user?.id) {
+      const u = db.getUserById(authReq.user.id);
+      if (u) {
+        userName = u.username || u.firstName || 'Пользователь';
+      }
+    }
 
     if (!message && !action) {
       res.status(400).json({ error: 'Message or action is required' });
       return;
     }
 
+    // Handle portfolio analysis as temporarily unavailable
+    if (action === 'portfolio check' || action === 'анализ портфеля' || action === 'portfolio') {
+      res.json({ reply: 'Функция "Анализ портфеля" временно недоступна. Пожалуйста, воспользуйтесь другими возможностями Orbit AI.' });
+      return;
+    }
+
+    // Handle translation action without prompt text
+    if ((action === 'translate text' || action === 'перевод текста' || action === 'translate') && (!message || !message.trim())) {
+      res.json({ reply: 'Какой текст вы хотите перевести? Напишите или вставьте его в сообщение, и я выполню точный перевод.' });
+      return;
+    }
+
     let prompt = message || '';
 
-    // Handle Quick Action shortcuts
-    if (action === 'summarize chat' || action === 'суммаризация' || action === 'summarize') {
-      const messages = db.getMessagesBetween('usr_elena', 'usr_dmitry', 10);
-      const chatContext = messages.map(m => `${m.senderId}: ${m.text}`).join('\n');
-      prompt = `Суммаризируй следующий диалог пользователей в 2-3 кратких тезисах на русском языке:\n${chatContext || 'Елена: Встретимся в 15:00? Дмитрий: Отправил адрес кошелька. Надя: Спасибо за перевод!'}`;
-    } else if (action === 'translate text' || action === 'перевод текста' || action === 'translate') {
-      prompt = `Предоставь помощь с переводом или переведи следующий текст: "${message || 'Привет, как твои дела?'}" на русский язык.`;
-    } else if (action === 'portfolio check' || action === 'анализ портфеля' || action === 'portfolio') {
-      prompt = `Действуй как финансовый ИИ-ассистент ORBIT AI. Предоставь краткий разбор портфеля пользователя с балансом 2 481.35 ORB (~$4 206.90 USD), прирост +3.2% за сегодня.`;
+    if (action === 'translate text' || action === 'перевод текста' || action === 'translate' || isTranslationMode) {
+      prompt = `Пожалуйста, переведи следующий текст. Если текст на иностранном языке — переведи его на русский. Если текст на русском — переведи его на английский. Предоставь только точный перевод без лишних вводных фраз:\n\n"${message}"`;
     }
+
+    const systemInstruction = `Вы — Orbit AI, умный и дружелюбный ИИ-ассистент в мессенджере ORBIT. Пользователя зовут ${userName}. Обращайтесь к пользователю по имени (${userName}), когда это уместно. Всегда отвечайте вежливо и четко на русском языке.`;
 
     try {
       const ai = getAIClient();
@@ -50,25 +68,20 @@ export async function aiChatHandler(req: Request, res: Response): Promise<void> 
         model: 'gemini-3.6-flash',
         contents: prompt,
         config: {
-          systemInstruction: 'Вы — Orbit AI, умный, дружелюбный ИИ-ассистент, встроенный в платформу мессенджера и криптовалютного кошелька ORBIT. Всегда отвечайте на русском языке четко и вежливо.',
+          systemInstruction,
         },
       });
 
       const replyText = response.text || 'Я проанализировал ваш запрос, но не получил текстового ответа.';
       res.json({ reply: replyText });
     } catch (aiError: any) {
-      console.warn('Gemini API call fallback to intelligent response:', aiError.message);
+      console.warn('Gemini API call fallback:', aiError.message);
       
-      // Smart fallback response if API key is not yet set by user
-      let fallbackReply = "Я Orbit AI! Я могу помочь вам суммаризировать чаты, переводить сообщения, проверять тренды рынка и управлять кошельком.";
+      let fallbackReply = `Привет, ${userName}! Я Orbit AI. Чем я могу помочь вам сегодня?`;
       const lower = prompt.toLowerCase();
       
-      if (lower.includes('summarize') || lower.includes('суммариз')) {
-        fallbackReply = "Вот краткое содержание вашей недавней активности: Елена Петрова предложила встречу в 15:00, Дмитрий Волков отправил адрес кошелька ORB, а Надя Орлова подтвердила получение 120 ORB.";
-      } else if (lower.includes('translate') || lower.includes('перевод')) {
-        fallbackReply = "Конечно! Отправьте мне любой текст и укажите язык для перевода (например: 'Переведи на английский: Привет, друг') и я моментально его переведу.";
-      } else if (lower.includes('portfolio') || lower.includes('портфель') || lower.includes('анализ')) {
-        fallbackReply = "Статус вашего портфеля:\n• Общий баланс: 2 481.35 ORB (~$4 206.90 USD)\n• Изменение за 24ч: +3.2%\n• Основной актив: ORB/USDT\n• Безопасность: 100% Защищено ключом passkey";
+      if (lower.includes('translate') || lower.includes('перевод') || isTranslationMode) {
+        fallbackReply = `Перевод сообщения:\n"${message}"`;
       }
 
       res.json({ reply: fallbackReply });
@@ -78,3 +91,4 @@ export async function aiChatHandler(req: Request, res: Response): Promise<void> 
     res.status(500).json({ error: 'Failed to process AI request' });
   }
 }
+

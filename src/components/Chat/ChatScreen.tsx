@@ -23,12 +23,20 @@ import {
   Download,
   Zap,
   Users,
+  UserPlus,
   Radio,
   Search,
   ChevronUp,
   ChevronDown,
   Globe,
   Languages,
+  CornerUpLeft,
+  CornerUpRight,
+  Eye,
+  Maximize2,
+  ExternalLink,
+  Share2,
+  Palette,
 } from 'lucide-react';
 import { Contact, Message, MessageReactionInfo, User } from '../../types';
 import { api } from '../../services/api';
@@ -37,6 +45,12 @@ import { cacheService } from '../../services/cacheService';
 import { E2EESecurityModal } from './E2EESecurityModal';
 import { CallOverlayModal, CallType } from './CallOverlayModal';
 import { VoiceRecorder } from './VoiceRecorder';
+import {
+  WallpaperModal,
+  WallpaperBackgroundLayer,
+  WallpaperSettings,
+  DEFAULT_WALLPAPER_SETTINGS,
+} from './WallpaperModal';
 import { VideoCircleRecorder } from './VideoCircleRecorder';
 import { StickerEmojiPicker } from './StickerEmojiPicker';
 import { VideoCirclePlayer } from './VideoCirclePlayer';
@@ -53,6 +67,7 @@ interface ChatScreenProps {
   user?: User | null;
   onOpenAuth?: () => void;
   onOpenUserProfile?: (userId: string) => void;
+  onRefreshContacts?: () => void;
 }
 
 export const ChatScreen: React.FC<ChatScreenProps> = ({
@@ -65,6 +80,7 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
   user,
   onOpenAuth,
   onOpenUserProfile,
+  onRefreshContacts,
 }) => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
@@ -76,27 +92,62 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
   const [sendingCrypto, setSendingCrypto] = useState(false);
   const [uploadingMedia, setUploadingMedia] = useState(false);
 
-  // Reaction State & Long-Press Handler
+  // Pending Photo/Media Attachment State (Photo with Caption)
+  const [pendingMedia, setPendingMedia] = useState<{
+    url: string;
+    mediaType: 'image' | 'file' | 'audio' | 'video_circle' | 'sticker' | 'document';
+    fileName?: string;
+    fileSize?: string;
+  } | null>(null);
+
+  // Reply Mechanics State (WhatsApp style)
+  const [replyingToMessage, setReplyingToMessage] = useState<Message | null>(null);
+
+  // Forward Mechanics State (WhatsApp style)
+  const [forwardingMessage, setForwardingMessage] = useState<Message | null>(null);
+  const [showForwardModal, setShowForwardModal] = useState(false);
+  const [forwardContacts, setForwardContacts] = useState<Contact[]>([]);
+  const [forwardSearch, setForwardSearch] = useState('');
+  const [sendingForward, setSendingForward] = useState(false);
+
+  // Full Screen Image Lightbox Modal State
+  const [fullScreenImage, setFullScreenImage] = useState<{ url: string; title?: string } | null>(null);
+
+  // Chat Wallpaper Background Customization State
+  const [wallpaperSettings, setWallpaperSettings] = useState<WallpaperSettings>(() => {
+    try {
+      const saved = localStorage.getItem('chat_wallpaper_settings');
+      if (saved) return JSON.parse(saved);
+    } catch (e) {
+      console.error('Failed to load wallpaper settings:', e);
+    }
+    return DEFAULT_WALLPAPER_SETTINGS;
+  });
+  const [showWallpaperModal, setShowWallpaperModal] = useState(false);
+
+  const handleSaveWallpaper = (newSettings: WallpaperSettings) => {
+    setWallpaperSettings(newSettings);
+    try {
+      localStorage.setItem('chat_wallpaper_settings', JSON.stringify(newSettings));
+    } catch (e) {
+      console.error('Failed to save wallpaper settings:', e);
+    }
+    showToast('Фон чата сохранен!');
+  };
+
+  // Selection & Reaction State
+  const [selectedMessage, setSelectedMessage] = useState<Message | null>(null);
   const [activeReactionPickerId, setActiveReactionPickerId] = useState<string | null>(null);
   const QUICK_EMOJIS = ['❤️', '👍', '🔥', '😂', '😮', '😢', '🙏', '🎉'];
   const longPressTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const reactionPressTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const lastTapRef = useRef<{ id: string; time: number }>({ id: '', time: 0 });
 
-  const handleTouchStartMessage = (messageId: string) => {
-    if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
-    longPressTimerRef.current = setTimeout(() => {
-      triggerHaptic('impactMedium');
-      setActiveReactionPickerId(messageId);
-    }, 450);
-  };
+  // Slow Mode state & countdown timer
+  const [slowModeCooldown, setSlowModeCooldown] = useState<number>(0);
+  const lastSentTimeRef = useRef<number>(0);
 
-  const handleTouchEndOrCancelMessage = () => {
-    if (longPressTimerRef.current) {
-      clearTimeout(longPressTimerRef.current);
-      longPressTimerRef.current = null;
-    }
-  };
-
-  // Channel & Group Permissions & Mute Logic
+  // Channel & Group Permissions & Settings
   const isChannelGroup = contact.isChannelGroup;
   const isChannel = isChannelGroup && contact.channelGroupType?.includes('channel');
   const isGroup = isChannelGroup && contact.channelGroupType?.includes('group');
@@ -108,7 +159,84 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
         (contact.adminIds && contact.adminIds.includes(user.id)) ||
         (contact.moderatorIds && contact.moderatorIds.includes(user.id))));
 
+  const isJoined =
+    !isChannelGroup ||
+    isUserAdminOrAuthor ||
+    (contact.memberIds && user ? contact.memberIds.includes(user.id) : true);
+
+  const [joinedChannelState, setJoinedChannelState] = useState<boolean | null>(null);
+  const isActuallyJoined = joinedChannelState !== null ? joinedChannelState : isJoined;
+
   const canPostInChannel = !isChannel || isUserAdminOrAuthor;
+  const reactionsDisabled = !!contact.disableReactions;
+  const commentsDisabled = !!contact.disableComments && isChannelGroup && !isUserAdminOrAuthor;
+  const availableReactions =
+    contact.allowedReactions && contact.allowedReactions.length > 0
+      ? contact.allowedReactions
+      : QUICK_EMOJIS;
+
+  // Slow Mode countdown effect
+  const slowModeSec = contact.slowMode || 0;
+  useEffect(() => {
+    if (!slowModeSec || isUserAdminOrAuthor) {
+      setSlowModeCooldown(0);
+      return;
+    }
+    const timer = setInterval(() => {
+      const elapsed = Math.floor((Date.now() - lastSentTimeRef.current) / 1000);
+      const remaining = slowModeSec - elapsed;
+      setSlowModeCooldown(remaining > 0 ? remaining : 0);
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [slowModeSec, isUserAdminOrAuthor]);
+
+  // Touch & Long Press Handlers for Messages
+  const handleTouchStartMessage = (m: Message) => {
+    if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+    longPressTimerRef.current = setTimeout(() => {
+      triggerHaptic('impactMedium');
+      setSelectedMessage(m);
+    }, 450);
+  };
+
+  const handleTouchEndOrCancelMessage = () => {
+    if (longPressTimerRef.current) {
+      clearTimeout(longPressTimerRef.current);
+      longPressTimerRef.current = null;
+    }
+  };
+
+  const handleMessageClick = (m: Message, e: React.MouseEvent) => {
+    const now = Date.now();
+    if (lastTapRef.current.id === m.id && now - lastTapRef.current.time < 300) {
+      // Double Tap Reaction!
+      e.stopPropagation();
+      if (!reactionsDisabled) {
+        const defaultEmoji = availableReactions[0] || '❤️';
+        handleToggleReaction(m.id, defaultEmoji);
+      }
+      lastTapRef.current = { id: '', time: 0 };
+    } else {
+      lastTapRef.current = { id: m.id, time: now };
+    }
+  };
+
+  // Touch & Long Press Handlers for Reactions (Hold reaction badge -> opens reaction picker bubble)
+  const handleReactionBadgeTouchStart = (messageId: string, e: React.SyntheticEvent) => {
+    if (reactionsDisabled) return;
+    if (reactionPressTimerRef.current) clearTimeout(reactionPressTimerRef.current);
+    reactionPressTimerRef.current = setTimeout(() => {
+      triggerHaptic('impactMedium');
+      setActiveReactionPickerId(messageId);
+    }, 400);
+  };
+
+  const handleReactionBadgeTouchEnd = () => {
+    if (reactionPressTimerRef.current) {
+      clearTimeout(reactionPressTimerRef.current);
+      reactionPressTimerRef.current = null;
+    }
+  };
 
   const [isFeedMuted, setIsFeedMuted] = useState(() => {
     try {
@@ -495,10 +623,42 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
   };
 
   const handleSendText = async (textOverride?: string, extraMediaProps?: Partial<Message>) => {
+    if (commentsDisabled) {
+      showToast('Комментарии отключены администратором');
+      return;
+    }
+
+    if (slowModeCooldown > 0 && !isUserAdminOrAuthor) {
+      showToast(`Медленный режим включен. Подождите еще ${slowModeCooldown} сек.`);
+      return;
+    }
+
     const textToSend = (textOverride ?? input).trim();
-    if (!textToSend && !extraMediaProps) return;
+    if (!textToSend && !extraMediaProps && !pendingMedia) return;
     triggerHaptic('success');
     if (!textOverride) setInput('');
+
+    if (!isUserAdminOrAuthor && slowModeSec > 0) {
+      lastSentTimeRef.current = Date.now();
+      setSlowModeCooldown(slowModeSec);
+    }
+
+    const mediaProps = extraMediaProps || (pendingMedia ? {
+      mediaUrl: pendingMedia.url,
+      mediaType: pendingMedia.mediaType,
+      fileName: pendingMedia.fileName,
+      fileSize: pendingMedia.fileSize,
+    } : {});
+
+    const replyProps = replyingToMessage ? {
+      replyTo: {
+        id: replyingToMessage.id,
+        text: replyingToMessage.text || (replyingToMessage.mediaType === 'image' ? 'Фотография' : 'Медиафайл'),
+        senderName: replyingToMessage.from === 'me' ? (user?.username || 'Вы') : contact.name,
+        mediaType: replyingToMessage.mediaType,
+        mediaUrl: replyingToMessage.mediaUrl,
+      }
+    } : {};
 
     const tempId = `temp_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     const optimisticMsg: Message = {
@@ -507,10 +667,16 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
       text: textToSend,
       timestamp: Date.now(),
       isEncrypted: true,
-      ...extraMediaProps,
+      authorName: user?.username || 'Вы',
+      viewsCount: 1,
+      ...mediaProps,
+      ...replyProps,
     };
 
     setMessages((prev) => [...prev, optimisticMsg]);
+    setPendingMedia(null);
+    setReplyingToMessage(null);
+
     requestAnimationFrame(() => {
       messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     });
@@ -518,11 +684,12 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
     try {
       const actualMsg = await api.sendMessage(contact.id, {
         text: textToSend,
-        mediaUrl: extraMediaProps?.mediaUrl,
-        mediaType: extraMediaProps?.mediaType,
+        mediaUrl: mediaProps.mediaUrl,
+        mediaType: mediaProps.mediaType,
+        replyTo: replyProps.replyTo,
       });
       setMessages((prev) =>
-        prev.map((m) => (m.id === tempId ? { ...actualMsg, ...extraMediaProps, isEncrypted: true } : m))
+        prev.map((m) => (m.id === tempId ? { ...actualMsg, ...mediaProps, ...replyProps, isEncrypted: true } : m))
       );
     } catch (err) {
       console.error('Failed to send message:', err);
@@ -592,18 +759,42 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
       const uploadRes = await api.uploadMedia(file);
       const isDoc = !file.type.startsWith('image/') && !file.type.startsWith('video/');
 
-      await handleSendText(file.name, {
-        mediaUrl: uploadRes.url,
-        mediaType: isDoc ? 'document' : (uploadRes.mediaType as any),
+      setPendingMedia({
+        url: uploadRes.url,
+        mediaType: isDoc ? 'document' : ((uploadRes.mediaType as any) || 'image'),
         fileName: file.name,
         fileSize: `${(file.size / (1024 * 1024)).toFixed(1)} MB`,
       });
+      showToast('Медиафайл прикреплён. Вы можете добавить подпись и отправить.');
     } catch (err) {
       console.error('Media upload failed:', err);
       showToast('Ошибка загрузки медиафайла');
     } finally {
       setUploadingMedia(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  const handleConfirmForward = async (targetContact: Contact) => {
+    if (!forwardingMessage) return;
+    setSendingForward(true);
+    try {
+      await api.sendMessage(targetContact.id, {
+        text: forwardingMessage.text || '',
+        mediaUrl: forwardingMessage.mediaUrl,
+        mediaType: forwardingMessage.mediaType,
+        fileName: forwardingMessage.fileName,
+        fileSize: forwardingMessage.fileSize,
+        isForwarded: true,
+        forwardedFrom: forwardingMessage.from === 'me' ? (user?.username || 'Вы') : contact.name,
+      });
+      showToast(`Сообщение переслано в "${targetContact.name}"`);
+      setShowForwardModal(false);
+      setForwardingMessage(null);
+    } catch (err: any) {
+      showToast(err.message || 'Ошибка при пересылке');
+    } finally {
+      setSendingForward(false);
     }
   };
 
@@ -633,11 +824,19 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
 
   const handleRemoveContact = async () => {
     try {
-      await api.removeContact(contact.id);
-      showToast('Контакт удалён из списка');
-      setTimeout(() => onBack(), 1200);
+      if (contact.id.startsWith('cg_')) {
+        try {
+          await api.deleteChannelGroup(contact.id);
+        } catch {
+          await api.leaveChannelGroup(contact.id);
+        }
+      } else {
+        await api.removeContact(contact.id);
+      }
+      showToast('Чат удалён');
+      setTimeout(() => onBack(), 800);
     } catch (err: any) {
-      showToast(err.message || 'Ошибка удаления контакта');
+      showToast(err.message || 'Ошибка удаления чата');
     }
   };
 
@@ -675,6 +874,12 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
 
   return (
     <div className="flex flex-col h-full bg-slate-50/50 dark:bg-slate-950/50 relative overflow-hidden">
+      {/* Dynamic Wallpaper Background Layer */}
+      <WallpaperBackgroundLayer
+        preset={wallpaperSettings.preset}
+        adaptTheme={wallpaperSettings.adaptTheme}
+        opacity={wallpaperSettings.opacity}
+      />
       {/* Hidden Global Audio & Video Players */}
       <audio
         ref={audioElRef}
@@ -755,8 +960,58 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
           <ArrowLeft size={19} />
         </button>
 
-        {/* Main Connected Header Bubble (Pill) */}
-        <div className="flex-1 flex items-center justify-between px-3 py-1.5 rounded-full bg-white/80 dark:bg-slate-900/80 backdrop-blur-xl border border-white/60 dark:border-slate-800/80 shadow-sm relative">
+        {/* Main Header Bubble: Normal Mode vs Selected Message Action Mode */}
+        {selectedMessage ? (
+          <div className="flex-1 flex items-center justify-between px-3.5 py-1.5 rounded-full bg-sky-500 text-white shadow-md animate-fade-in relative z-30">
+            <div className="flex items-center gap-2 min-w-0">
+              <button
+                onClick={() => setSelectedMessage(null)}
+                className="p-1 rounded-full hover:bg-white/20 transition shrink-0"
+                title="Отменить выбор"
+              >
+                <X size={17} />
+              </button>
+              <div className="truncate text-xs font-semibold flex items-center gap-1">
+                <span className="shrink-0">Выбрано:</span>
+                <span className="opacity-90 font-normal truncate">
+                  {selectedMessage.text || (selectedMessage.mediaType === 'image' ? 'Фотография' : 'Медиафайл')}
+                </span>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-1.5 shrink-0">
+              {!commentsDisabled && (
+                <button
+                  onClick={() => {
+                    setReplyingToMessage(selectedMessage);
+                    setSelectedMessage(null);
+                    showToast('Ответ на сообщение');
+                  }}
+                  className="p-1.5 rounded-full hover:bg-white/20 transition flex items-center justify-center text-white"
+                  title="Ответить"
+                >
+                  <CornerUpLeft size={18} />
+                </button>
+              )}
+
+              <button
+                onClick={() => {
+                  setForwardingMessage(selectedMessage);
+                  setShowForwardModal(true);
+                  if (forwardContacts.length === 0) {
+                    api.getContacts().then((res) => setForwardContacts(res)).catch(() => {});
+                  }
+                  setSelectedMessage(null);
+                }}
+                className="p-1.5 rounded-full hover:bg-white/20 transition flex items-center justify-center text-white"
+                title="Переслать"
+              >
+                <CornerUpRight size={18} />
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex-1 flex items-center justify-between px-3 py-1.5 rounded-full bg-white/80 dark:bg-slate-900/80 backdrop-blur-xl border border-white/60 dark:border-slate-800/80 shadow-sm relative">
           <div
             onClick={() => {
               if (onOpenUserProfile) onOpenUserProfile(contact.id);
@@ -866,6 +1121,17 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
                     <span>Поиск по сообщениям</span>
                   </button>
 
+                  <button
+                    onClick={() => {
+                      setShowMenu(false);
+                      setShowWallpaperModal(true);
+                    }}
+                    className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition font-medium"
+                  >
+                    <Palette size={14} className="text-sky-500" />
+                    <span>Оформить фон чата</span>
+                  </button>
+
                   {isChannel ? (
                     <>
                       {isUserAdminOrAuthor && (
@@ -913,7 +1179,7 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
                     className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition"
                   >
                     <Trash2 size={14} className="text-slate-500 dark:text-slate-400" />
-                    <span>Удалить контакт</span>
+                    <span>Удалить чат</span>
                   </button>
 
                   <button
@@ -942,7 +1208,8 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
             </div>
           </div>
         </div>
-      </div>
+      )}
+    </div>
 
       {/* Floating Top Bubbles Container (Search Bubble + Playback Bubble stacked vertically) */}
       <div className="px-3 pb-1 space-y-1 shrink-0 z-20">
@@ -1086,17 +1353,165 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
               minute: '2-digit',
             });
 
+            // CHANNEL NEWS FEED POST RENDERING (For channels: full-width news item cards)
+            if (isChannel) {
+              return (
+                <div id={`msg-${m.id}`} key={m.id} className="w-full my-3.5 animate-fade-in">
+                  <div className="w-full bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border border-slate-200/80 dark:border-slate-800 rounded-3xl p-4 shadow-sm hover:shadow-md transition space-y-3">
+                    {/* Channel Author Header */}
+                    <div className="flex items-center justify-between pb-2 border-b border-slate-100 dark:border-slate-800/80">
+                      <div className="flex items-center gap-2.5">
+                        <div className={`h-9 w-9 rounded-full bg-gradient-to-br ${contact.color} flex items-center justify-center text-xs font-bold text-white shadow-inner overflow-hidden shrink-0`}>
+                          {contact.avatarUrl ? (
+                            <img src={contact.avatarUrl} alt={contact.name} className="h-full w-full object-cover" />
+                          ) : (
+                            contact.initials
+                          )}
+                        </div>
+                        <div>
+                          <div className="text-xs font-bold text-slate-800 dark:text-white flex items-center gap-1.5">
+                            <span>{contact.name}</span>
+                            <span className="px-2 py-0.5 rounded-full bg-sky-500/10 text-sky-500 font-semibold text-[10px]">
+                              Автор канала
+                            </span>
+                          </div>
+                          <div className="text-[10px] text-slate-400 font-mono">{formattedTime}</div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-3 text-slate-400">
+                        <div className="flex items-center gap-1">
+                          <Eye size={13} />
+                          <span className="text-[10px] font-mono font-medium">{m.viewsCount || 1}</span>
+                        </div>
+                        {!contact.disableForwarding && (
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setForwardingMessage(m);
+                              setShowForwardModal(true);
+                            }}
+                            className="flex items-center gap-1 text-[10px] font-semibold text-slate-500 dark:text-slate-400 hover:text-sky-500 transition px-2 py-0.5 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800"
+                            title="Переслать сообщение"
+                          >
+                            <CornerUpRight size={13} />
+                            <span>Переслать</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Forwarded Header if present */}
+                    {m.isForwarded && (
+                      <div className="flex items-center gap-1.5 text-[11px] font-semibold text-sky-500 bg-sky-500/10 px-3 py-1 rounded-xl w-fit">
+                        <CornerUpRight size={13} />
+                        <span>Переслано от {m.forwardedFrom || 'автора'}</span>
+                      </div>
+                    )}
+
+                    {/* Quoted Reply Block if present */}
+                    {m.replyTo && (
+                      <div
+                        onClick={() => {
+                          const el = document.getElementById(`msg-${m.replyTo?.id}`);
+                          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        }}
+                        className="p-2.5 rounded-2xl bg-slate-100 dark:bg-slate-800/80 border-l-4 border-sky-500 text-xs cursor-pointer hover:bg-slate-200/80 dark:hover:bg-slate-700/80 transition"
+                      >
+                        <div className="text-[11px] font-bold text-sky-500">{m.replyTo.senderName}</div>
+                        <div className="text-xs text-slate-600 dark:text-slate-300 truncate">{m.replyTo.text}</div>
+                      </div>
+                    )}
+
+                    {/* Attached Photo / Media with Full-Screen Lightbox view */}
+                    {m.mediaUrl && (
+                      <div
+                        className="w-full max-h-80 rounded-2xl overflow-hidden border border-slate-100 dark:border-slate-800 bg-slate-950 cursor-pointer relative group"
+                        onClick={() => setFullScreenImage({ url: m.mediaUrl!, title: contact.name })}
+                      >
+                        {m.mediaType === 'image' || !m.mediaType ? (
+                          <img src={m.mediaUrl} alt="Channel Post Media" className="w-full h-full object-cover group-hover:scale-105 transition duration-300" />
+                        ) : m.mediaType === 'document' ? (
+                          <div className="flex items-center gap-3 p-3 bg-slate-800 text-white">
+                            <FileText size={20} className="text-sky-400" />
+                            <span className="text-xs font-semibold">{m.fileName || 'Документ'}</span>
+                          </div>
+                        ) : (
+                          <img src={m.mediaUrl} alt="" className="w-full h-full object-cover" />
+                        )}
+                        {m.mediaType === 'image' && (
+                          <div className="absolute inset-0 bg-black/20 opacity-0 group-hover:opacity-100 transition flex items-center justify-center text-white">
+                            <div className="px-3 py-1.5 rounded-full bg-black/60 backdrop-blur-md text-[11px] font-semibold flex items-center gap-1.5 border border-white/20">
+                              <Maximize2 size={13} />
+                              <span>Открыть фото</span>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Text Message Content */}
+                    {m.text && (
+                      <div className="text-xs sm:text-sm text-slate-800 dark:text-slate-100 leading-relaxed whitespace-pre-wrap font-sans">
+                        {m.text}
+                      </div>
+                    )}
+
+                    {/* Channel Post Footer Actions */}
+                    <div className="flex items-center justify-between pt-2 border-t border-slate-100 dark:border-slate-800/80 text-xs">
+                      {/* Reactions */}
+                      {!reactionsDisabled ? (
+                        <div className="flex items-center gap-1.5">
+                          {availableReactions.slice(0, 5).map((emoji) => {
+                            const count = m.reactions?.[emoji]?.count || 0;
+                            const userReacted = m.reactions?.[emoji]?.userReacted;
+                            return (
+                              <button
+                                key={emoji}
+                                onClick={() => handleToggleReaction(m.id, emoji)}
+                                onTouchStart={(e) => handleReactionBadgeTouchStart(m.id, e)}
+                                onTouchEnd={handleReactionBadgeTouchEnd}
+                                onContextMenu={(e) => {
+                                  e.preventDefault();
+                                  setActiveReactionPickerId(m.id);
+                                }}
+                                className={`px-2 py-1 rounded-full text-xs flex items-center gap-1 transition active:scale-95 ${
+                                  userReacted
+                                    ? 'bg-sky-500/20 text-sky-500 border border-sky-500/30 font-bold'
+                                    : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700'
+                                }`}
+                              >
+                                <span>{emoji}</span>
+                                {count > 0 && <span className="text-[10px]">{count}</span>}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ) : <div />}
+                    </div>
+                  </div>
+                </div>
+              );
+            }
+
+            // STANDARD 1:1 OR GROUP CHAT BUBBLE RENDERING
             return (
               <div id={`msg-${m.id}`} key={m.id} className={`flex ${isMe ? 'justify-end' : 'justify-start'} group/row my-0.5`}>
                 <div className={`relative flex items-end gap-1.5 max-w-[85%] sm:max-w-[75%] ${isMe ? 'flex-row-reverse' : 'flex-row'}`}>
                   {/* Message Bubble Container - Soft Airy Tones */}
                   <div
-                    onTouchStart={() => handleTouchStartMessage(m.id)}
+                    onClick={(e) => handleMessageClick(m, e)}
+                    onTouchStart={() => handleTouchStartMessage(m)}
                     onTouchEnd={handleTouchEndOrCancelMessage}
                     onTouchMove={handleTouchEndOrCancelMessage}
-                    onMouseDown={() => handleTouchStartMessage(m.id)}
+                    onMouseDown={() => handleTouchStartMessage(m)}
                     onMouseUp={handleTouchEndOrCancelMessage}
                     onMouseLeave={handleTouchEndOrCancelMessage}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      triggerHaptic('impactMedium');
+                      setSelectedMessage(m);
+                    }}
                     className={`relative group ${
                       m.mediaType === 'sticker' || m.mediaType === 'video_circle'
                         ? 'bg-transparent shadow-none border-0 p-0 text-xs sm:text-sm'
@@ -1107,14 +1522,36 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
                           }`
                     }`}
                   >
+                    {/* Forwarded Message Header Badge */}
+                    {m.isForwarded && (
+                      <div className="flex items-center gap-1 text-[10px] font-semibold text-sky-500 mb-1">
+                        <CornerUpRight size={11} />
+                        <span>Переслано от {m.forwardedFrom || 'пользователя'}</span>
+                      </div>
+                    )}
+
+                    {/* Quoted Reply Block */}
+                    {m.replyTo && (
+                      <div
+                        onClick={() => {
+                          const el = document.getElementById(`msg-${m.replyTo?.id}`);
+                          if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        }}
+                        className="p-2 mb-1.5 rounded-xl bg-black/5 dark:bg-white/5 border-l-3 border-sky-500 text-xs cursor-pointer hover:bg-black/10 dark:hover:bg-white/10 transition"
+                      >
+                        <div className="text-[10px] font-bold text-sky-500">{m.replyTo.senderName}</div>
+                        <div className="text-[11px] text-slate-600 dark:text-slate-300 truncate">{m.replyTo.text}</div>
+                      </div>
+                    )}
+
                     {/* Quick Reaction Floating Picker Bar */}
-                    {activeReactionPickerId === m.id && (
+                    {!reactionsDisabled && activeReactionPickerId === m.id && (
                       <div
                         className={`absolute z-30 -top-11 ${
                           isMe ? 'right-0' : 'left-0'
                         } flex items-center gap-0.5 p-1 rounded-full bg-white/95 dark:bg-slate-900/95 backdrop-blur-2xl border border-slate-200/80 dark:border-slate-700/80 shadow-xl animate-scale-in`}
                       >
-                        {QUICK_EMOJIS.map((emoji) => {
+                        {availableReactions.map((emoji) => {
                           const isReacted = m.reactions?.[emoji]?.userReacted;
                           return (
                             <button
@@ -1287,13 +1724,19 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
                       />
                     )}
 
-                    {/* Image / Video Media Renderer */}
+                    {/* Image / Video Media Renderer with Lightbox support */}
                     {m.mediaType === 'image' && m.mediaUrl && (
-                      <div className="mb-1 rounded-2xl overflow-hidden relative max-w-[260px] sm:max-w-[280px] border border-black/5 dark:border-white/10 shadow-2xs group">
+                      <div
+                        onClick={() => setFullScreenImage({ url: m.mediaUrl!, title: contact.name })}
+                        className="mb-1 rounded-2xl overflow-hidden relative max-w-[260px] sm:max-w-[280px] border border-black/5 dark:border-white/10 shadow-2xs group cursor-pointer"
+                      >
                         {dataSaverMode && !unlockedHdMedia[m.id] ? (
                           <div
                             className="relative group cursor-pointer"
-                            onClick={() => setUnlockedHdMedia((prev) => ({ ...prev, [m.id]: true }))}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setUnlockedHdMedia((prev) => ({ ...prev, [m.id]: true }));
+                            }}
                           >
                             <img
                               src={m.mediaUrl}
@@ -1308,7 +1751,6 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
                           </div>
                         ) : (
                           <div className="relative w-full overflow-hidden flex items-center justify-center bg-slate-900/10 dark:bg-slate-900/40">
-                            {/* Mirrored background for small images to fit standard block size cleanly */}
                             <img
                               src={m.mediaUrl}
                               alt=""
@@ -1317,8 +1759,14 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
                             <img
                               src={m.mediaUrl}
                               alt="Media"
-                              className="relative z-10 w-full max-h-[280px] object-contain rounded-2xl"
+                              className="relative z-10 w-full max-h-[280px] object-contain rounded-2xl group-hover:scale-105 transition duration-300"
                             />
+                            <div className="absolute inset-0 z-20 bg-black/20 opacity-0 group-hover:opacity-100 transition flex items-center justify-center text-white">
+                              <div className="px-3 py-1 rounded-full bg-black/60 backdrop-blur-md text-[10px] font-semibold flex items-center gap-1">
+                                <Maximize2 size={12} />
+                                <span>Развернуть</span>
+                              </div>
+                            </div>
                           </div>
                         )}
                       </div>
@@ -1425,7 +1873,7 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
                     )}
 
                     {/* Message Reactions Row */}
-                    {m.reactions && Object.keys(m.reactions).length > 0 && (
+                    {!reactionsDisabled && m.reactions && Object.keys(m.reactions).length > 0 && (
                       <div className={`flex flex-wrap gap-1 mt-1.5 ${isMe ? 'justify-end' : 'justify-start'}`}>
                         {Object.entries(m.reactions).map(([emoji, val]) => {
                           const info = val as MessageReactionInfo;
@@ -1436,6 +1884,12 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
                               onClick={(e) => {
                                 e.stopPropagation();
                                 handleToggleReaction(m.id, emoji);
+                              }}
+                              onTouchStart={(e) => handleReactionBadgeTouchStart(m.id, e)}
+                              onTouchEnd={handleReactionBadgeTouchEnd}
+                              onContextMenu={(e) => {
+                                e.preventDefault();
+                                setActiveReactionPickerId(m.id);
                               }}
                               className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs transition-all transform active:scale-90 select-none ${
                                 info.userReacted
@@ -1453,17 +1907,21 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
                     )}
                   </div>
 
-                  {/* Reaction Hover Action Button */}
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setActiveReactionPickerId(activeReactionPickerId === m.id ? null : m.id);
-                    }}
-                    className="opacity-0 group-hover/row:opacity-100 focus:opacity-100 transition-opacity h-6 w-6 rounded-full bg-white/90 dark:bg-slate-800/90 border border-slate-200/80 dark:border-slate-700/80 text-slate-400 hover:text-sky-500 hover:bg-slate-100 dark:hover:bg-slate-700 flex items-center justify-center shrink-0 shadow-2xs self-center mb-1"
-                    title="Добавить реакцию"
-                  >
-                    <Smile size={13} />
-                  </button>
+                  {/* Reaction Button on Hover (Reply & Forward moved to top header bar on long-press) */}
+                  {!reactionsDisabled && (
+                    <div className="opacity-0 group-hover/row:opacity-100 focus:opacity-100 transition-opacity flex items-center gap-0.5 self-center mb-1">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setActiveReactionPickerId(activeReactionPickerId === m.id ? null : m.id);
+                        }}
+                        className="h-6 w-6 rounded-full bg-white/90 dark:bg-slate-800/90 border border-slate-200/80 dark:border-slate-700/80 text-slate-400 hover:text-sky-500 hover:bg-slate-100 dark:hover:bg-slate-700 flex items-center justify-center shrink-0 shadow-2xs"
+                        title="Реакция"
+                      >
+                        <Smile size={13} />
+                      </button>
+                    </div>
+                  )}
                 </div>
               </div>
             );
@@ -1503,10 +1961,91 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
       {/* Input Control Area */}
       {!isRecordingVoice && !isRecordingCircle && (
         <>
-          {isChannel && !canPostInChannel ? (
+          {/* Reply Preview Bar above input */}
+          {replyingToMessage && (
+            <div className="mx-3 mb-1 px-3.5 py-2 rounded-2xl bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border border-sky-500/30 shadow-lg flex items-center justify-between gap-2 text-xs animate-fade-in shrink-0 z-20">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="h-7 w-1 bg-sky-500 rounded-full shrink-0" />
+                <div className="truncate">
+                  <span className="text-[11px] font-bold text-sky-500 block">
+                    Ответ на сообщение ({replyingToMessage.from === 'me' ? 'Вы' : contact.name})
+                  </span>
+                  <span className="text-[11px] text-slate-600 dark:text-slate-300 truncate block">
+                    {replyingToMessage.text || (replyingToMessage.mediaType === 'image' ? 'Фотография' : 'Медиафайл')}
+                  </span>
+                </div>
+              </div>
+              <button
+                onClick={() => setReplyingToMessage(null)}
+                className="p-1 rounded-full text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                title="Отменить ответ"
+              >
+                <X size={15} />
+              </button>
+            </div>
+          )}
+
+          {/* Pending Media Attachment Preview Bar above input (Photo with Caption) */}
+          {pendingMedia && (
+            <div className="mx-3 mb-1 px-3.5 py-2 rounded-2xl bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border border-slate-200 dark:border-slate-800 shadow-lg flex items-center justify-between gap-3 text-xs animate-fade-in shrink-0 z-20">
+              <div className="flex items-center gap-3 min-w-0">
+                {pendingMedia.mediaType === 'image' ? (
+                  <img src={pendingMedia.url} alt="Attachment" className="h-10 w-10 rounded-xl object-cover shrink-0 border border-slate-200 dark:border-slate-700 shadow-2xs" />
+                ) : (
+                  <div className="h-10 w-10 rounded-xl bg-sky-500/10 text-sky-500 flex items-center justify-center shrink-0">
+                    <FileText size={18} />
+                  </div>
+                )}
+                <div className="truncate">
+                  <span className="text-xs font-bold text-slate-800 dark:text-white block truncate">
+                    {pendingMedia.fileName || 'Прикреплённый файл'}
+                  </span>
+                  <span className="text-[10px] text-sky-500 font-semibold block">
+                    Медиафайл прикреплён. Добавьте текст и нажмите 'Отправить'
+                  </span>
+                </div>
+              </div>
+              <button
+                onClick={() => setPendingMedia(null)}
+                className="p-1.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                title="Удалить прикрепление"
+              >
+                <X size={15} />
+              </button>
+            </div>
+          )}
+
+          {!isActuallyJoined ? (
+            <div className="p-3.5 bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border-t border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3 safe-bottom shrink-0 shadow-lg">
+              <div className="text-xs text-slate-600 dark:text-slate-300 font-medium">
+                Вы ещё не {isChannel ? 'подписаны на этот канал' : 'состоите в этой группе'}.
+              </div>
+              <button
+                onClick={async () => {
+                  try {
+                    await api.joinChannelGroup(contact.id);
+                    setJoinedChannelState(true);
+                    showToast(`Вы ${isChannel ? 'подписались на канал' : 'вступили в группу'}!`);
+                    if (onRefreshContacts) onRefreshContacts();
+                  } catch (err: any) {
+                    showToast(err.message || 'Ошибка при вступлении');
+                  }
+                }}
+                className="px-5 py-2 rounded-2xl bg-sky-500 hover:bg-sky-600 text-white text-xs font-bold shadow-md shadow-sky-500/20 active:scale-95 transition shrink-0 flex items-center gap-1.5"
+              >
+                <UserPlus size={15} />
+                <span>{isChannel ? 'Подписаться' : 'Вступить'}</span>
+              </button>
+            </div>
+          ) : isChannel && !canPostInChannel ? (
             <div className="px-4 py-3 bg-white/80 dark:bg-slate-900/80 backdrop-blur-xl border-t border-slate-200/50 dark:border-slate-800 flex items-center justify-center gap-2 text-xs font-semibold text-slate-500 dark:text-slate-400 safe-bottom shrink-0">
               <Radio size={16} className="text-sky-500 animate-pulse" />
               <span>В канале могут публиковать записи только автор, администраторы и модераторы</span>
+            </div>
+          ) : commentsDisabled ? (
+            <div className="px-4 py-3 bg-white/80 dark:bg-slate-900/80 backdrop-blur-xl border-t border-slate-200/50 dark:border-slate-800 flex items-center justify-center gap-2 text-xs font-semibold text-slate-500 dark:text-slate-400 safe-bottom shrink-0">
+              <Ban size={16} className="text-amber-500" />
+              <span>Комментарии отключены администратором</span>
             </div>
           ) : isGuest ? (
             <div className="p-3.5 bg-white/90 dark:bg-slate-900/90 backdrop-blur-xl border-t border-white/60 dark:border-slate-800 flex items-center justify-between gap-3 safe-bottom shrink-0">
@@ -1533,8 +2072,8 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
               {/* Standalone Circular Attachment Button */}
               <button
                 onClick={() => fileInputRef.current?.click()}
-                disabled={uploadingMedia}
-                className="h-10 w-10 rounded-full bg-white/80 dark:bg-slate-900/80 backdrop-blur-xl border border-white/60 dark:border-slate-800/80 shadow-sm flex items-center justify-center text-slate-600 dark:text-slate-300 hover:text-sky-500 hover:bg-white dark:hover:bg-slate-800 transition active:scale-95 shrink-0"
+                disabled={uploadingMedia || slowModeCooldown > 0}
+                className="h-10 w-10 rounded-full bg-white/80 dark:bg-slate-900/80 backdrop-blur-xl border border-white/60 dark:border-slate-800/80 shadow-sm flex items-center justify-center text-slate-600 dark:text-slate-300 hover:text-sky-500 hover:bg-white dark:hover:bg-slate-800 transition active:scale-95 shrink-0 disabled:opacity-50"
                 title="Прикрепить файл или фото"
               >
                 {uploadingMedia ? (
@@ -1561,14 +2100,26 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && handleSendText()}
-                  placeholder="Зашифрованное сообщение..."
-                  className="flex-1 bg-transparent border-none outline-none text-sm text-slate-800 dark:text-white placeholder:text-slate-400 px-1"
+                  placeholder={
+                    slowModeCooldown > 0
+                      ? `Медленный режим (${slowModeCooldown}с)...`
+                      : "Зашифрованное сообщение..."
+                  }
+                  disabled={slowModeCooldown > 0}
+                  className="flex-1 bg-transparent border-none outline-none text-sm text-slate-800 dark:text-white placeholder:text-slate-400 px-1 disabled:opacity-60"
                 />
+
+                {slowModeCooldown > 0 && !isUserAdminOrAuthor && (
+                  <span className="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-500 font-mono text-[10px] font-bold shrink-0 animate-pulse">
+                    ⏱ {slowModeCooldown}s
+                  </span>
+                )}
 
                 {input.trim() ? (
                   <button
                     onClick={() => handleSendText()}
-                    className="h-8 w-8 rounded-full bg-sky-500 hover:bg-sky-600 text-white flex items-center justify-center shadow-md shadow-sky-500/20 active:scale-95 transition shrink-0"
+                    disabled={slowModeCooldown > 0}
+                    className="h-8 w-8 rounded-full bg-sky-500 hover:bg-sky-600 text-white flex items-center justify-center shadow-md shadow-sky-500/20 active:scale-95 transition shrink-0 disabled:opacity-50"
                   >
                     <Send size={15} />
                   </button>
@@ -1582,7 +2133,8 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
                       e.preventDefault();
                       setInputMode(inputMode === 'mic' ? 'video_circle' : 'mic');
                     }}
-                    className={`h-8 w-8 rounded-full flex items-center justify-center shadow-md transition shrink-0 select-none touch-none active:scale-105 ${
+                    disabled={slowModeCooldown > 0}
+                    className={`h-8 w-8 rounded-full flex items-center justify-center shadow-md transition shrink-0 select-none touch-none active:scale-105 disabled:opacity-50 ${
                       inputMode === 'mic'
                         ? 'bg-sky-500 hover:bg-sky-600 text-white shadow-sky-500/20'
                         : 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-indigo-500/20'
@@ -1724,6 +2276,138 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
           </div>
         </div>
       )}
+
+      {/* Forward Message Modal (WhatsApp 1:1 style) */}
+      {showForwardModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-md animate-fade-in">
+          <div className="w-full max-w-sm rounded-3xl p-5 bg-white dark:bg-slate-900 shadow-2xl border border-slate-200 dark:border-slate-800 text-slate-800 dark:text-white space-y-3">
+            <div className="flex items-center justify-between pb-2 border-b border-slate-100 dark:border-slate-800">
+              <div className="flex items-center gap-2">
+                <CornerUpRight size={18} className="text-sky-500" />
+                <h3 className="text-sm font-bold">Переслать сообщение</h3>
+              </div>
+              <button
+                onClick={() => {
+                  setShowForwardModal(false);
+                  setForwardingMessage(null);
+                }}
+                className="p-1 rounded-full text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            {/* Quoted Message Preview */}
+            {forwardingMessage && (
+              <div className="p-2.5 rounded-2xl bg-slate-100 dark:bg-slate-800 border-l-4 border-sky-500 text-xs space-y-0.5">
+                <span className="text-[10px] font-bold text-sky-500 block">Сообщение для пересылки:</span>
+                <p className="text-slate-700 dark:text-slate-300 truncate">
+                  {forwardingMessage.text || (forwardingMessage.mediaType === 'image' ? 'Фотография' : 'Медиафайл')}
+                </p>
+              </div>
+            )}
+
+            {/* Contact Search Bar */}
+            <div className="relative">
+              <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input
+                type="text"
+                value={forwardSearch}
+                onChange={(e) => setForwardSearch(e.target.value)}
+                placeholder="Поиск чата или контакта..."
+                className="w-full pl-8 pr-3 py-2 text-xs rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 outline-none"
+              />
+            </div>
+
+            {/* Contacts List */}
+            <div className="max-h-60 overflow-y-auto space-y-1 pr-1 no-scrollbar">
+              {forwardContacts
+                .filter((c) => c.name.toLowerCase().includes(forwardSearch.toLowerCase()))
+                .map((c) => (
+                  <button
+                    key={c.id}
+                    onClick={() => handleConfirmForward(c)}
+                    disabled={sendingForward}
+                    className="w-full flex items-center justify-between p-2 rounded-2xl hover:bg-slate-100 dark:hover:bg-slate-800 transition text-left group"
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <div className={`h-8 w-8 rounded-full bg-gradient-to-br ${c.color} flex items-center justify-center text-xs font-bold text-white shrink-0 overflow-hidden`}>
+                        {c.avatarUrl ? (
+                          <img src={c.avatarUrl} alt={c.name} className="h-full w-full object-cover" />
+                        ) : (
+                          c.initials
+                        )}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="text-xs font-semibold text-slate-800 dark:text-slate-100 truncate">{c.name}</div>
+                        <div className="text-[10px] text-slate-400 truncate">{c.type === 'channel' ? 'Канал' : 'Контакт'}</div>
+                      </div>
+                    </div>
+                    <div className="h-7 w-7 rounded-full bg-sky-500/10 text-sky-500 flex items-center justify-center opacity-0 group-hover:opacity-100 transition shrink-0">
+                      <CornerUpRight size={13} />
+                    </div>
+                  </button>
+                ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Full-Screen Image Lightbox Modal */}
+      {fullScreenImage && (
+        <div
+          className="fixed inset-0 z-50 bg-black/95 backdrop-blur-2xl flex flex-col items-center justify-between p-4 animate-fade-in"
+          onClick={() => setFullScreenImage(null)}
+        >
+          {/* Lightbox Header */}
+          <div className="w-full flex items-center justify-between z-10 text-white" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center gap-2">
+              <span className="text-xs sm:text-sm font-bold">{fullScreenImage.title || 'Просмотр фото'}</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <a
+                href={fullScreenImage.url}
+                target="_blank"
+                rel="noreferrer"
+                download
+                className="p-2 rounded-full bg-white/10 hover:bg-white/20 transition text-white"
+                title="Скачать фото"
+              >
+                <Download size={18} />
+              </a>
+              <button
+                onClick={() => setFullScreenImage(null)}
+                className="p-2 rounded-full bg-white/10 hover:bg-white/20 transition text-white"
+                title="Закрыть"
+              >
+                <X size={20} />
+              </button>
+            </div>
+          </div>
+
+          {/* Lightbox Image Container */}
+          <div className="flex-1 w-full flex items-center justify-center p-2" onClick={(e) => e.stopPropagation()}>
+            <img
+              src={fullScreenImage.url}
+              alt="Full size view"
+              className="max-h-[85vh] max-w-[95vw] object-contain rounded-2xl shadow-2xl border border-white/10"
+            />
+          </div>
+
+          {/* Lightbox Footer */}
+          <div className="text-[11px] text-slate-400 font-mono pb-2" onClick={(e) => e.stopPropagation()}>
+            Нажмите X или в любом месте, чтобы закрыть
+          </div>
+        </div>
+      )}
+
+      {/* Wallpaper Background Customizer Modal */}
+      <WallpaperModal
+        isOpen={showWallpaperModal}
+        onClose={() => setShowWallpaperModal(false)}
+        settings={wallpaperSettings}
+        onSave={handleSaveWallpaper}
+      />
     </div>
   );
 };

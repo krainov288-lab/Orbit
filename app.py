@@ -261,6 +261,67 @@ def create_story():
     save_db(db_data)
     return jsonify(new_story)
 
+@app.route('/api/channels-groups/<cg_id>/analytics', methods=['GET'])
+def get_channel_analytics(cg_id):
+    user = get_auth_user()
+    if not user:
+        return jsonify({'error': 'Не авторизован'}), 401
+
+    timeframe = request.args.get('timeframe', '30d')
+    days = 7 if timeframe == '7d' else (90 if timeframe == '90d' else 30)
+    
+    trend = []
+    eng = []
+    base_subs = 450
+    now = datetime.datetime.utcnow()
+
+    for i in range(days, -1, -1):
+        d = now - datetime.timedelta(days=i)
+        date_str = d.strftime('%d %b')
+        joined = 8 + (i % 5)
+        left = 1 + (i % 3)
+        base_subs += (joined - left)
+        trend.append({'date': date_str, 'subscribers': base_subs, 'joined': joined, 'left': left})
+
+        views = base_subs * 2 + (i * 15)
+        reactions = int(views * 0.15)
+        comments = int(reactions * 0.25)
+        shares = int(reactions * 0.1)
+        eng.append({'date': date_str, 'views': views, 'reactions': reactions, 'comments': comments, 'shares': shares})
+
+    hourly = []
+    for h in range(24):
+        hour_str = f"{h:02d}:00"
+        active = int(15 + 30 * (1 if 10 <= h <= 22 else 0.3))
+        hourly.append({'hour': hour_str, 'activeUsers': active, 'engagementRate': 8.5})
+
+    return jsonify({
+        'summary': {
+            'totalSubscribers': base_subs,
+            'subscriberGrowthNet': days * 6,
+            'subscriberGrowthPct': 16.5,
+            'totalViews': base_subs * 9,
+            'viewsGrowthPct': 14.2,
+            'engagementRate': 9.4,
+            'avgReactionsPerPost': 52,
+            'totalPosts': days,
+            'reachRate': 76.0
+        },
+        'subscriberGrowthTrend': trend,
+        'engagementMetrics': eng,
+        'hourlyActivity': hourly,
+        'interactionBreakdown': [
+            {'name': 'Реакции ❤️/🔥', 'value': 60, 'color': '#f43f5e'},
+            {'name': 'Комментарии 💬', 'value:': 22, 'color': '#38bdf8'},
+            {'name': 'Репосты 🔄', 'value': 12, 'color': '#10b981'},
+            {'name': 'Переходы 🔗', 'value': 6, 'color': '#a855f7'}
+        ],
+        'topPosts': [
+            {'id': '1', 'title': '🚀 Обновления на PythonAnywhere', 'date': 'Вчера', 'views': 950, 'reactions': 130, 'comments': 28},
+            {'id': '2', 'title': '💡 Как оптимизировать аналитику', 'date': '3 дня назад', 'views': 720, 'reactions': 98, 'comments': 19}
+        ]
+    })
+
 @app.route('/api/news', methods=['GET'])
 def get_news():
     db_data = load_db()

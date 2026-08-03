@@ -1,10 +1,12 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, FileText, Languages, TrendingUp, Loader2 } from 'lucide-react';
+import { Send, Languages, TrendingUp, Loader2 } from 'lucide-react';
 import { api } from '../../services/api';
+import { User } from '../../types';
 
 interface AIScreenProps {
   isDark?: boolean;
   isGuest?: boolean;
+  user?: User | null;
   onOpenAuth?: () => void;
   initialPrompt?: string;
   initialAction?: string;
@@ -18,28 +20,32 @@ interface AIMessage {
 }
 
 const aiQuickActions = [
-  { icon: FileText, label: 'Суммаризация' },
-  { icon: Languages, label: 'Перевод текста' },
-  { icon: TrendingUp, label: 'Анализ портфеля' },
+  { icon: Languages, label: 'Перевод текста', action: 'translate' },
+  { icon: TrendingUp, label: 'Анализ портфеля', action: 'portfolio', disabled: true },
 ];
 
 export const AIScreen: React.FC<AIScreenProps> = ({
   isDark,
   isGuest,
+  user,
   onOpenAuth,
   initialPrompt,
   initialAction,
   onClearInitial,
 }) => {
+  const userName = user?.username || user?.firstName || '';
   const [messages, setMessages] = useState<AIMessage[]>([
     {
       id: '1',
       from: 'ai',
-      text: 'Привет! Я Orbit AI. Задавайте любые вопросы, суммаризируйте чаты или переводите сообщения.',
+      text: userName
+        ? `Привет, ${userName}! Я Orbit AI. Чем я могу помочь вам сегодня?`
+        : 'Привет! Я Orbit AI. Чем я могу помочь вам сегодня?',
     },
   ]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const [isTranslationMode, setIsTranslationMode] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -48,21 +54,55 @@ export const AIScreen: React.FC<AIScreenProps> = ({
 
   const handleSend = async (customPrompt?: string, actionLabel?: string) => {
     const textToSend = customPrompt || input.trim();
-    if (!textToSend && !actionLabel) return;
+    const actionClean = (actionLabel || '').toLowerCase();
+
+    // 1) Handle Portfolio Analysis action (Temporarily Unavailable)
+    if (actionClean.includes('portfolio') || actionClean.includes('анализ')) {
+      if (onClearInitial) onClearInitial();
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `ai_${Date.now()}`,
+          from: 'ai',
+          text: 'Функция "Анализ портфеля" временно недоступна.',
+        },
+      ]);
+      return;
+    }
+
+    // 2) Handle Translate Action (Prompt user for text explicitly without fake user message)
+    if ((actionClean.includes('translate') || actionClean.includes('перевод')) && !textToSend) {
+      if (onClearInitial) onClearInitial();
+      setIsTranslationMode(true);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `ai_${Date.now()}`,
+          from: 'ai',
+          text: 'Какой текст вы хотите перевести? Напишите или вставьте его в поле ниже, и я переведу его для вас.',
+        },
+      ]);
+      return;
+    }
+
+    if (!textToSend) return;
 
     if (!customPrompt) setInput('');
 
     const userMessage: AIMessage = {
       id: `usr_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
       from: 'me',
-      text: actionLabel && !textToSend ? `[Действие]: ${actionLabel}` : textToSend,
+      text: textToSend,
     };
 
     setMessages((prev) => [...prev, userMessage]);
     setLoading(true);
 
+    const activeTransMode = isTranslationMode;
+    setIsTranslationMode(false);
+
     try {
-      const res = await api.sendAIChat(textToSend, actionLabel);
+      const res = await api.sendAIChat(textToSend, activeTransMode ? 'translate' : undefined, activeTransMode);
       const aiMessage: AIMessage = {
         id: `ai_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
         from: 'ai',
@@ -126,16 +166,30 @@ export const AIScreen: React.FC<AIScreenProps> = ({
           <button
             key={a.label}
             onClick={() => {
+              if (a.disabled) {
+                setMessages((prev) => [
+                  ...prev,
+                  {
+                    id: `ai_${Date.now()}`,
+                    from: 'ai',
+                    text: 'Функция "Анализ портфеля" временно недоступна.',
+                  },
+                ]);
+                return;
+              }
               if (isGuest && onOpenAuth) {
                 onOpenAuth();
               } else {
-                handleSend('', a.label.toLowerCase());
+                handleSend('', a.action);
               }
             }}
-            className="glass-button flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-full px-3.5 py-2 text-xs font-medium active:scale-95 transition"
+            className={`glass-button flex items-center gap-1.5 whitespace-nowrap shrink-0 rounded-full px-3.5 py-2 text-xs font-medium transition ${
+              a.disabled ? 'opacity-50 cursor-not-allowed' : 'active:scale-95'
+            }`}
           >
-            <a.icon size={14} className="text-blue-500" />
+            <a.icon size={14} className={a.disabled ? 'text-slate-400' : 'text-blue-500'} />
             <span>{a.label}</span>
+            {a.disabled && <span className="text-[10px] text-slate-400 ml-1">(недоступно)</span>}
           </button>
         ))}
       </div>
@@ -160,7 +214,7 @@ export const AIScreen: React.FC<AIScreenProps> = ({
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => e.key === 'Enter' && handleSend()}
-              placeholder="Спросите Orbit AI..."
+              placeholder={isTranslationMode ? 'Вставьте текст для перевода...' : 'Спросите Orbit AI...'}
               className="flex-1 bg-transparent text-sm outline-none text-primary placeholder:text-muted"
             />
           </div>
@@ -176,3 +230,4 @@ export const AIScreen: React.FC<AIScreenProps> = ({
     </div>
   );
 };
+

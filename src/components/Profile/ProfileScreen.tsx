@@ -1,6 +1,7 @@
 import React, { useState, useRef } from 'react';
-import { User, Contact } from '../../types';
+import { User, Contact, ChatFolder } from '../../types';
 import { api } from '../../services/api';
+import { cacheService } from '../../services/cacheService';
 import { AdminPanelModal } from './AdminPanelModal';
 import { useLanguage, SupportedLanguage } from '../../context/LanguageContext';
 import { validateNickname } from '../../utils/validation';
@@ -36,6 +37,11 @@ import {
   Users,
   UserCheck,
   Search,
+  FolderKanban,
+  BarChart3,
+  Folder,
+  FolderMinus,
+  Sparkles,
 } from 'lucide-react';
 
 interface ProfileScreenProps {
@@ -132,8 +138,94 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
     return [];
   });
 
+  // Folders state & statistics
+  const [folders] = useState<ChatFolder[]>(() => {
+    const storageKey = user ? `orbit_chat_folders_${user.email}` : 'orbit_chat_folders_guest';
+    const saved = localStorage.getItem(storageKey);
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {}
+    }
+    const personalIds = contacts.filter((c) => !c.isChannelGroup).slice(0, 3).map((c) => c.id);
+    const workIds = contacts.filter((c) => c.isChannelGroup || c.name.toLowerCase().includes('рабоч') || c.name.toLowerCase().includes('work')).map((c) => c.id);
+    const financeIds = contacts.filter((c) => c.name.toLowerCase().includes('кошелек') || c.name.toLowerCase().includes('wallet') || c.name.toLowerCase().includes('банк') || c.name.toLowerCase().includes('фин')).map((c) => c.id);
+
+    return [
+      { id: 'f_personal', name: 'Личные', contactIds: personalIds },
+      { id: 'f_work', name: 'Рабочие', contactIds: workIds },
+      { id: 'f_finance', name: 'Финансы', contactIds: financeIds },
+    ];
+  });
+
+  const [showFolderStatsModal, setShowFolderStatsModal] = useState(false);
+  const [selectedFolderIdForDetails, setSelectedFolderIdForDetails] = useState<string | null>(null);
+
+  // Folder Statistics Calculations
+  const totalContacts = contacts.length;
+  const allFolderContactIds = new Set(folders.flatMap((f) => f.contactIds));
+  const uncategorizedContacts = contacts.filter((c) => !allFolderContactIds.has(c.id));
+  const categorizedCount = totalContacts - uncategorizedContacts.length;
+  const organizationPercentage = totalContacts > 0 ? Math.round((categorizedCount / totalContacts) * 100) : 100;
+
+  const folderThemeMap: Record<string, { bg: string; text: string; bar: string; border: string }> = {
+    Личные: { bg: 'bg-sky-500/10 dark:bg-sky-500/20', text: 'text-sky-600 dark:text-sky-400', bar: 'bg-sky-500', border: 'border-sky-500/30' },
+    Рабочие: { bg: 'bg-indigo-500/10 dark:bg-indigo-500/20', text: 'text-indigo-600 dark:text-indigo-400', bar: 'bg-indigo-500', border: 'border-indigo-500/30' },
+    Финансы: { bg: 'bg-emerald-500/10 dark:bg-emerald-500/20', text: 'text-emerald-600 dark:text-emerald-400', bar: 'bg-emerald-500', border: 'border-emerald-500/30' },
+  };
+
+  const defaultPalette = [
+    { bg: 'bg-purple-500/10 dark:bg-purple-500/20', text: 'text-purple-600 dark:text-purple-400', bar: 'bg-purple-500', border: 'border-purple-500/30' },
+    { bg: 'bg-rose-500/10 dark:bg-rose-500/20', text: 'text-rose-600 dark:text-rose-400', bar: 'bg-rose-500', border: 'border-rose-500/30' },
+    { bg: 'bg-amber-500/10 dark:bg-amber-500/20', text: 'text-amber-600 dark:text-amber-400', bar: 'bg-amber-500', border: 'border-amber-500/30' },
+    { bg: 'bg-teal-500/10 dark:bg-teal-500/20', text: 'text-teal-600 dark:text-teal-400', bar: 'bg-teal-500', border: 'border-teal-500/30' },
+  ];
+
+  const getFolderTheme = (name: string, index: number) => {
+    if (folderThemeMap[name]) return folderThemeMap[name];
+    return defaultPalette[index % defaultPalette.length];
+  };
+
+  const folderStatsList = folders.map((f, idx) => {
+    const fContacts = contacts.filter((c) => f.contactIds.includes(c.id));
+    const chatCount = fContacts.length;
+    const unreadCount = fContacts.reduce((sum, c) => sum + (c.unread || 0), 0);
+    
+    const messageCount = fContacts.reduce((sum, c) => {
+      const cached = cacheService.getCachedMessages(c.id);
+      const count = cached && cached.length > 0 ? cached.length : (c.last ? 1 : 0) + (c.unread || 0);
+      return sum + Math.max(count, 1);
+    }, 0);
+
+    const channelsCount = fContacts.filter((c) => c.isChannelGroup && c.channelGroupType?.includes('channel')).length;
+    const groupsCount = fContacts.filter((c) => c.isChannelGroup && c.channelGroupType?.includes('group')).length;
+    const dmsCount = fContacts.filter((c) => !c.isChannelGroup).length;
+
+    return {
+      folder: f,
+      contacts: fContacts,
+      chatCount,
+      unreadCount,
+      messageCount,
+      channelsCount,
+      groupsCount,
+      dmsCount,
+      theme: getFolderTheme(f.name, idx),
+    };
+  });
+
+  const uncategorizedUnread = uncategorizedContacts.reduce((sum, c) => sum + (c.unread || 0), 0);
+  const uncategorizedMessageCount = uncategorizedContacts.reduce((sum, c) => {
+    const cached = cacheService.getCachedMessages(c.id);
+    const count = cached && cached.length > 0 ? cached.length : (c.last ? 1 : 0) + (c.unread || 0);
+    return sum + Math.max(count, 1);
+  }, 0);
+
+  const totalMessagesInApp = folderStatsList.reduce((sum, item) => sum + item.messageCount, 0) + uncategorizedMessageCount;
+
   // Toast message
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+
   const [showAdminModal, setShowAdminModal] = useState(false);
 
   const userRole = user?.role || (user?.username?.toLowerCase() === 'admin' ? 'sysadmin' : 'user');
@@ -200,6 +292,26 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
     setShowEmailVerifyModal(true);
     setToastMessage(`Код подтверждения email (${user?.email}): ${code}`);
     setTimeout(() => setToastMessage(null), 10000);
+  };
+
+  const handleToggleEmailVerify = () => {
+    if (isEmailVerified) {
+      setIsEmailVerified(false);
+      if (user) {
+        localStorage.setItem(`orbit_email_verified_${user.id}`, 'false');
+        api.updateProfile({ isEmailVerified: false }).catch(() => {});
+      }
+      setToastMessage('Подтверждение электронной почты отключено');
+      setTimeout(() => setToastMessage(null), 3000);
+    } else {
+      handleStartEmailVerify();
+    }
+  };
+
+  const handleTogglePin = () => {
+    if (onOpenPinSetup) {
+      onOpenPinSetup();
+    }
   };
 
   const handleConfirmEmailCode = async () => {
@@ -281,7 +393,7 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
 
       {/* Toast Alert */}
       {toastMessage && (
-        <div className="fixed top-5 left-1/2 -translate-x-1/2 z-50 bg-slate-800 dark:bg-slate-200 text-white dark:text-slate-900 text-xs font-semibold px-4 py-2.5 rounded-full shadow-lg flex items-center gap-2 border border-slate-700 animate-fade-in max-w-xs text-center">
+        <div className="fixed top-5 left-1/2 -translate-x-1/2 z-[100] bg-slate-800 dark:bg-slate-200 text-white dark:text-slate-900 text-xs font-semibold px-4 py-2.5 rounded-full shadow-2xl flex items-center gap-2 border border-slate-700 dark:border-slate-300 animate-fade-in max-w-xs text-center">
           <CheckCircle2 size={16} className="text-emerald-400 dark:text-emerald-600 shrink-0" />
           <span>{toastMessage}</span>
         </div>
@@ -414,18 +526,21 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
         </div>
       </div>
 
+
+
+
       {/* Admin Panel Entry Card */}
       {hasAdminAccess && (
-        <div className="glass-card rounded-3xl p-4 border border-amber-500/30 bg-gradient-to-br from-amber-500/10 via-orange-500/5 to-amber-500/10 shadow-lg">
+        <div className="glass-card rounded-3xl p-4 border border-slate-200/60 dark:border-slate-800/60 shadow-lg">
           <div className="flex items-center justify-between gap-3">
             <div className="flex items-center gap-3">
-              <div className="h-10 w-10 rounded-2xl bg-gradient-to-br from-amber-500 to-orange-600 flex items-center justify-center text-white shadow-md shrink-0">
-                <Shield size={20} />
+              <div className="h-9 w-9 rounded-2xl bg-white/90 dark:bg-slate-800/90 border border-slate-200/60 dark:border-slate-700/60 text-slate-700 dark:text-slate-200 shadow-2xs flex items-center justify-center shrink-0">
+                <Shield size={18} />
               </div>
               <div>
                 <h3 className="text-xs font-bold text-primary flex items-center gap-1.5">
                   Панель Поддержки и Управления
-                  <span className="text-[9px] font-extrabold uppercase px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-600 dark:text-amber-400 border border-amber-500/30">
+                  <span className="text-[9px] font-extrabold uppercase px-2 py-0.5 rounded-full bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300 border border-slate-300/50 dark:border-slate-700/50">
                     {userRole === 'sysadmin' ? 'SYSADMIN' : userRole === 'admin' ? 'ADMIN' : 'SUPPORT'}
                   </span>
                 </h3>
@@ -436,7 +551,7 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
             </div>
             <button
               onClick={() => setShowAdminModal(true)}
-              className="px-3.5 py-2 rounded-xl bg-amber-500 hover:bg-amber-600 text-white text-xs font-bold shadow-md active:scale-95 transition shrink-0"
+              className="px-3.5 py-2 rounded-xl bg-slate-800 dark:bg-slate-200 hover:bg-slate-900 dark:hover:bg-white text-white dark:text-slate-900 text-xs font-bold shadow-md active:scale-95 transition shrink-0"
             >
               Открыть
             </button>
@@ -453,8 +568,8 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
         {/* Email Confirmation Row (Completes Registration Stage) */}
         <div className="flex items-center justify-between p-3 rounded-2xl hover:bg-black/5 dark:hover:bg-white/5 transition">
           <div className="flex items-center gap-3">
-            <div className="h-8 w-8 rounded-xl bg-blue-500/10 text-blue-500 flex items-center justify-center border border-blue-500/20">
-              <Mail size={16} />
+            <div className="h-9 w-9 rounded-2xl bg-white/90 dark:bg-slate-800/90 border border-slate-200/60 dark:border-slate-700/60 text-slate-700 dark:text-slate-200 shadow-2xs flex items-center justify-center shrink-0">
+              <Mail size={18} />
             </div>
             <div>
               <div className="text-xs font-bold text-primary flex items-center gap-1.5">
@@ -463,31 +578,30 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
               <div className="text-[11px] text-muted">
                 {isEmailVerified
                   ? 'Почта подтверждена. Регистрация полностью завершена'
-                  : 'Завершите этап регистрации, подтвердив адрес электронной почты'}
+                  : 'Завершите регистрацию'}
               </div>
             </div>
           </div>
-          {isEmailVerified ? (
-            <span className="px-2.5 py-1 rounded-full bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 text-[11px] font-bold flex items-center gap-1 border border-emerald-500/20">
-              <CheckCheck size={13} />
-              <span>Подтверждено</span>
-            </span>
-          ) : (
-            <button
-              onClick={handleStartEmailVerify}
-              className="px-3 py-1.5 rounded-2xl bg-blue-500 hover:bg-blue-600 text-white font-medium text-xs shadow-sm active:scale-95 transition"
-            >
-              Подтвердить
-            </button>
-          )}
+          <button
+            onClick={handleToggleEmailVerify}
+            className={`w-10 h-6 rounded-full transition-colors relative p-0.5 shrink-0 ${
+              isEmailVerified ? 'bg-blue-500' : 'bg-slate-300 dark:bg-slate-700'
+            }`}
+          >
+            <div
+              className={`w-5 h-5 rounded-full bg-white shadow-sm transition-transform ${
+                isEmailVerified ? 'translate-x-4' : 'translate-x-0'
+              }`}
+            />
+          </button>
         </div>
 
         {/* PIN Code Row */}
         {onOpenPinSetup && (
           <div className="flex items-center justify-between p-3 rounded-2xl hover:bg-black/5 dark:hover:bg-white/5 transition">
             <div className="flex items-center gap-3">
-              <div className="h-8 w-8 rounded-xl bg-blue-500/10 text-blue-500 flex items-center justify-center border border-blue-500/20">
-                <Lock size={16} />
+              <div className="h-9 w-9 rounded-2xl bg-white/90 dark:bg-slate-800/90 border border-slate-200/60 dark:border-slate-700/60 text-slate-700 dark:text-slate-200 shadow-2xs flex items-center justify-center shrink-0">
+                <Lock size={18} />
               </div>
               <div>
                 <div className="text-xs font-bold text-primary">ПИН-код защиты профиля</div>
@@ -497,10 +611,16 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
               </div>
             </div>
             <button
-              onClick={onOpenPinSetup}
-              className="px-3 py-1.5 rounded-2xl bg-blue-500 hover:bg-blue-600 text-white font-medium text-xs shadow-sm active:scale-95 transition"
+              onClick={handleTogglePin}
+              className={`w-10 h-6 rounded-full transition-colors relative p-0.5 shrink-0 ${
+                isPinSet ? 'bg-blue-500' : 'bg-slate-300 dark:bg-slate-700'
+              }`}
             >
-              {isPinSet ? 'Изменить' : 'Установить'}
+              <div
+                className={`w-5 h-5 rounded-full bg-white shadow-sm transition-transform ${
+                  isPinSet ? 'translate-x-4' : 'translate-x-0'
+                }`}
+              />
             </button>
           </div>
         )}
@@ -508,8 +628,8 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
         {/* 2FA Toggle Row */}
         <div className="flex items-center justify-between p-3 rounded-2xl hover:bg-black/5 dark:hover:bg-white/5 transition">
           <div className="flex items-center gap-3">
-            <div className="h-8 w-8 rounded-xl bg-blue-500/10 text-blue-500 flex items-center justify-center border border-blue-500/20">
-              <KeyRound size={16} />
+            <div className="h-9 w-9 rounded-2xl bg-white/90 dark:bg-slate-800/90 border border-slate-200/60 dark:border-slate-700/60 text-slate-700 dark:text-slate-200 shadow-2xs flex items-center justify-center shrink-0">
+              <KeyRound size={18} />
             </div>
             <div>
               <div className="text-xs font-bold text-primary">Двухфакторная аутентификация (2FA)</div>
@@ -518,7 +638,7 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
           </div>
           <button
             onClick={handleToggle2FA}
-            className={`w-10 h-6 rounded-full transition-colors relative p-0.5 ${
+            className={`w-10 h-6 rounded-full transition-colors relative p-0.5 shrink-0 ${
               is2FAEnabled ? 'bg-blue-500' : 'bg-slate-300 dark:bg-slate-700'
             }`}
           >
@@ -533,8 +653,8 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
         {/* Touch / Face ID Toggle Row */}
         <div className="flex items-center justify-between p-3 rounded-2xl hover:bg-black/5 dark:hover:bg-white/5 transition">
           <div className="flex items-center gap-3">
-            <div className="h-8 w-8 rounded-xl bg-indigo-500/10 text-indigo-500 flex items-center justify-center border border-indigo-500/20">
-              <ScanFace size={16} />
+            <div className="h-9 w-9 rounded-2xl bg-white/90 dark:bg-slate-800/90 border border-slate-200/60 dark:border-slate-700/60 text-slate-700 dark:text-slate-200 shadow-2xs flex items-center justify-center shrink-0">
+              <ScanFace size={18} />
             </div>
             <div>
               <div className="text-xs font-bold text-primary">Вход по Touch ID / Face ID</div>
@@ -543,7 +663,7 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
           </div>
           <button
             onClick={handleToggleBiometrics}
-            className={`w-10 h-6 rounded-full transition-colors relative p-0.5 ${
+            className={`w-10 h-6 rounded-full transition-colors relative p-0.5 shrink-0 ${
               isBiometricsEnabled ? 'bg-blue-500' : 'bg-slate-300 dark:bg-slate-700'
             }`}
           >
@@ -565,8 +685,8 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
 
         <div className="flex items-center justify-between p-3 rounded-2xl hover:bg-black/5 dark:hover:bg-white/5 transition">
           <div className="flex items-center gap-3">
-            <div className="h-8 w-8 rounded-xl bg-blue-500/10 text-blue-500 flex items-center justify-center border border-blue-500/20">
-              <Bell size={16} />
+            <div className="h-9 w-9 rounded-2xl bg-white/90 dark:bg-slate-800/90 border border-slate-200/60 dark:border-slate-700/60 text-slate-700 dark:text-slate-200 shadow-2xs flex items-center justify-center shrink-0">
+              <Bell size={18} />
             </div>
             <div>
               <div className="text-xs font-bold text-primary">Push-уведомления</div>
@@ -579,7 +699,7 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
               setPushEnabled(val);
               localStorage.setItem('orbit_notif_push', val ? 'true' : 'false');
             }}
-            className={`w-10 h-6 rounded-full transition-colors relative p-0.5 ${
+            className={`w-10 h-6 rounded-full transition-colors relative p-0.5 shrink-0 ${
               pushEnabled ? 'bg-blue-500' : 'bg-slate-300 dark:bg-slate-700'
             }`}
           >
@@ -593,8 +713,8 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
 
         <div className="flex items-center justify-between p-3 rounded-2xl hover:bg-black/5 dark:hover:bg-white/5 transition">
           <div className="flex items-center gap-3">
-            <div className="h-8 w-8 rounded-xl bg-amber-500/10 text-amber-500 flex items-center justify-center border border-amber-500/20">
-              <Volume2 size={16} />
+            <div className="h-9 w-9 rounded-2xl bg-white/90 dark:bg-slate-800/90 border border-slate-200/60 dark:border-slate-700/60 text-slate-700 dark:text-slate-200 shadow-2xs flex items-center justify-center shrink-0">
+              <Volume2 size={18} />
             </div>
             <div>
               <div className="text-xs font-bold text-primary">Звуковые сигналы</div>
@@ -607,7 +727,7 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
               setSoundEnabled(val);
               localStorage.setItem('orbit_notif_sound', val ? 'true' : 'false');
             }}
-            className={`w-10 h-6 rounded-full transition-colors relative p-0.5 ${
+            className={`w-10 h-6 rounded-full transition-colors relative p-0.5 shrink-0 ${
               soundEnabled ? 'bg-blue-500' : 'bg-slate-300 dark:bg-slate-700'
             }`}
           >
@@ -625,7 +745,7 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
               onTriggerTestNotification('Тестовое уведомление ORBIT', 'Система уведомлений работает корректно.');
             }
           }}
-          className="w-full mt-2 py-2.5 rounded-2xl border border-blue-500/20 bg-blue-500/5 hover:bg-blue-500/10 text-blue-500 text-xs font-semibold flex items-center justify-center gap-2 transition"
+          className="w-full mt-2 py-2.5 rounded-2xl border border-slate-200 dark:border-slate-700 bg-white/60 dark:bg-slate-800/60 hover:bg-white dark:hover:bg-slate-800 text-slate-800 dark:text-slate-200 text-xs font-semibold flex items-center justify-center gap-2 transition shadow-2xs"
         >
           <Send size={14} />
           <span>Отправить тестовое уведомление</span>
@@ -639,10 +759,32 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
           <HardDrive size={13} />
         </div>
 
+        {/* Folder Analytics Tab Row */}
+        <div
+          onClick={() => setShowFolderStatsModal(true)}
+          className="flex items-center justify-between p-3 rounded-2xl hover:bg-black/5 dark:hover:bg-white/5 transition cursor-pointer"
+        >
+          <div className="flex items-center gap-3">
+            <div className="h-9 w-9 rounded-2xl bg-sky-500/10 text-sky-600 dark:text-sky-400 border border-sky-500/20 shadow-2xs flex items-center justify-center shrink-0">
+              <FolderKanban size={18} />
+            </div>
+            <div>
+              <div className="text-xs font-bold text-primary flex items-center gap-1.5">
+                <span>Аналитика и статистика папок</span>
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-sky-500/15 text-sky-600 dark:text-sky-400 border border-sky-400/30">
+                  {organizationPercentage}% организовано
+                </span>
+              </div>
+              <div className="text-[11px] text-muted">Анализ распределения чатов и сообщений</div>
+            </div>
+          </div>
+          <ChevronRight size={16} className="text-slate-400" />
+        </div>
+
         <div className="flex items-center justify-between p-3 rounded-2xl hover:bg-black/5 dark:hover:bg-white/5 transition">
           <div className="flex items-center gap-3">
-            <div className="h-8 w-8 rounded-xl bg-cyan-500/10 text-cyan-500 flex items-center justify-center border border-cyan-500/20">
-              <Download size={16} />
+            <div className="h-9 w-9 rounded-2xl bg-white/90 dark:bg-slate-800/90 border border-slate-200/60 dark:border-slate-700/60 text-slate-700 dark:text-slate-200 shadow-2xs flex items-center justify-center shrink-0">
+              <Download size={18} />
             </div>
             <div>
               <div className="text-xs font-bold text-primary">Автозагрузка фото и видео</div>
@@ -655,7 +797,7 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
               setAutoDownloadMedia(val);
               localStorage.setItem('orbit_auto_download_media', val ? 'true' : 'false');
             }}
-            className={`w-10 h-6 rounded-full transition-colors relative p-0.5 ${
+            className={`w-10 h-6 rounded-full transition-colors relative p-0.5 shrink-0 ${
               autoDownloadMedia ? 'bg-blue-500' : 'bg-slate-300 dark:bg-slate-700'
             }`}
           >
@@ -669,8 +811,8 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
 
         <div className="flex items-center justify-between p-3 rounded-2xl hover:bg-black/5 dark:hover:bg-white/5 transition">
           <div className="flex items-center gap-3">
-            <div className="h-8 w-8 rounded-xl bg-amber-500/10 text-amber-500 flex items-center justify-center border border-amber-500/20">
-              <Zap size={16} />
+            <div className="h-9 w-9 rounded-2xl bg-white/90 dark:bg-slate-800/90 border border-slate-200/60 dark:border-slate-700/60 text-slate-700 dark:text-slate-200 shadow-2xs flex items-center justify-center shrink-0">
+              <Zap size={18} />
             </div>
             <div>
               <div className="text-xs font-bold text-primary">Экономия трафика</div>
@@ -683,7 +825,7 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
               setDataSaverMode(val);
               localStorage.setItem('orbit_data_saver_mode', val ? 'true' : 'false');
             }}
-            className={`w-10 h-6 rounded-full transition-colors relative p-0.5 ${
+            className={`w-10 h-6 rounded-full transition-colors relative p-0.5 shrink-0 ${
               dataSaverMode ? 'bg-blue-500' : 'bg-slate-300 dark:bg-slate-700'
             }`}
           >
@@ -706,8 +848,8 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
         {/* Platform Language Selector */}
         <div className="flex items-center justify-between p-3 rounded-2xl hover:bg-black/5 dark:hover:bg-white/5 transition">
           <div className="flex items-center gap-3">
-            <div className="h-8 w-8 rounded-xl bg-blue-500/10 text-blue-500 flex items-center justify-center border border-blue-500/20">
-              <Globe size={16} />
+            <div className="h-9 w-9 rounded-2xl bg-white/90 dark:bg-slate-800/90 border border-slate-200/60 dark:border-slate-700/60 text-slate-700 dark:text-slate-200 shadow-2xs flex items-center justify-center shrink-0">
+              <Globe size={18} />
             </div>
             <div>
               <div className="text-xs font-bold text-primary">{t.platformLanguage}</div>
@@ -738,8 +880,8 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
         {/* Country of Residence Selector */}
         <div className="flex items-center justify-between p-3 rounded-2xl hover:bg-black/5 dark:hover:bg-white/5 transition">
           <div className="flex items-center gap-3">
-            <div className="h-8 w-8 rounded-xl bg-emerald-500/10 text-emerald-500 flex items-center justify-center border border-emerald-500/20">
-              <MapPin size={16} />
+            <div className="h-9 w-9 rounded-2xl bg-white/90 dark:bg-slate-800/90 border border-slate-200/60 dark:border-slate-700/60 text-slate-700 dark:text-slate-200 shadow-2xs flex items-center justify-center shrink-0">
+              <MapPin size={18} />
             </div>
             <div>
               <div className="text-xs font-bold text-primary">Страна проживания</div>
@@ -776,8 +918,8 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
 
         <div className="flex items-center justify-between p-3 rounded-2xl transition opacity-60">
           <div className="flex items-center gap-3">
-            <div className="h-8 w-8 rounded-xl bg-amber-500/10 text-amber-500 flex items-center justify-center border border-amber-500/20">
-              <Sun size={16} />
+            <div className="h-9 w-9 rounded-2xl bg-white/90 dark:bg-slate-800/90 border border-slate-200/60 dark:border-slate-700/60 text-slate-700 dark:text-slate-200 shadow-2xs flex items-center justify-center shrink-0">
+              <Sun size={18} />
             </div>
             <div>
               <div className="text-xs font-bold text-primary flex items-center gap-1.5">
@@ -795,7 +937,7 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
               setToastMessage('Переход на тёмную тему пока недоступен');
               setTimeout(() => setToastMessage(null), 3000);
             }}
-            className="w-10 h-6 rounded-full transition-colors relative p-0.5 bg-slate-300 cursor-not-allowed opacity-60"
+            className="w-10 h-6 rounded-full transition-colors relative p-0.5 shrink-0 bg-slate-300 cursor-not-allowed opacity-60"
             title="Тёмное оформление временно недоступно"
           >
             <div className="w-5 h-5 rounded-full bg-white shadow-sm transition-transform translate-x-0" />
@@ -807,8 +949,8 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
           className="w-full flex items-center justify-between p-3 rounded-2xl hover:bg-red-50 dark:hover:bg-red-500/10 transition text-left group"
         >
           <div className="flex items-center gap-3">
-            <div className="h-8 w-8 rounded-xl bg-red-500/10 text-red-500 flex items-center justify-center border border-red-500/20">
-              <LogOut size={16} />
+            <div className="h-9 w-9 rounded-2xl bg-white/90 dark:bg-slate-800/90 border border-slate-200/60 dark:border-slate-700/60 text-slate-700 dark:text-slate-200 shadow-2xs flex items-center justify-center shrink-0">
+              <LogOut size={18} />
             </div>
             <div>
               <div className="text-xs font-bold text-red-500 dark:text-red-400">Выйти из аккаунта</div>
@@ -841,8 +983,29 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
             </div>
 
             <p className="text-xs text-muted leading-relaxed">
-              Код подтверждения отправлен на почту <strong className="text-primary">{user.email}</strong>. Введите его ниже:
+              Код подтверждения отправлен на почту <strong className="text-primary">{user.email}</strong>.
             </p>
+
+            {/* Display Demo Verification Code clearly inside the Modal */}
+            {sentEmailCode && (
+              <div className="p-3 rounded-2xl bg-blue-500/10 dark:bg-blue-500/20 border border-blue-500/30 text-center space-y-1">
+                <div className="text-[11px] font-semibold text-blue-600 dark:text-blue-400">
+                  Ваш демо-код подтверждения:
+                </div>
+                <div className="flex items-center justify-center gap-2 pt-0.5">
+                  <span className="text-xl font-bold font-mono tracking-widest text-blue-700 dark:text-blue-300">
+                    {sentEmailCode}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setEmailCode(sentEmailCode)}
+                    className="px-2.5 py-1 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-[10px] font-bold shadow-2xs active:scale-95 transition"
+                  >
+                    Вставить
+                  </button>
+                </div>
+              </div>
+            )}
 
             <div>
               <input
@@ -864,7 +1027,7 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
 
             <button
               onClick={handleConfirmEmailCode}
-              className="w-full py-2.5 rounded-2xl bg-blue-600 text-white font-semibold text-xs shadow-sm active:scale-95 transition"
+              className="w-full py-2.5 rounded-2xl bg-blue-600 hover:bg-blue-500 text-white font-semibold text-xs shadow-sm active:scale-95 transition"
             >
               Подтвердить Email
             </button>
@@ -1108,12 +1271,202 @@ export const ProfileScreen: React.FC<ProfileScreenProps> = ({
         </div>
       )}
 
+      {/* Folder Statistics Analytics Modal */}
+      {showFolderStatsModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-md animate-fade-in">
+          <div className="relative w-full max-w-md max-h-[85vh] overflow-y-auto no-scrollbar rounded-3xl p-5 glass-card border border-white/60 dark:border-slate-800 text-primary shadow-2xl space-y-4">
+            <button
+              onClick={() => {
+                setShowFolderStatsModal(false);
+                setSelectedFolderIdForDetails(null);
+              }}
+              className="absolute top-4 right-4 h-8 w-8 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-muted hover:bg-slate-200 dark:hover:bg-slate-700 transition"
+            >
+              <X size={16} />
+            </button>
+
+            {/* Header */}
+            <div className="flex items-center gap-3">
+              <div className="h-10 w-10 rounded-2xl bg-gradient-to-tr from-sky-500/20 to-indigo-500/20 border border-sky-400/30 text-sky-500 flex items-center justify-center shadow-2xs">
+                <BarChart3 size={20} />
+              </div>
+              <div>
+                <h3 className="text-base font-extrabold text-primary">Аналитика и статистика папок</h3>
+                <p className="text-xs text-muted">Привычки организации переписок</p>
+              </div>
+            </div>
+
+            {/* Organizational Habit Recommendation Banner */}
+            <div className="p-3.5 rounded-2xl bg-gradient-to-r from-sky-500/10 via-indigo-500/10 to-purple-500/10 border border-sky-400/30 text-xs space-y-1">
+              <div className="font-bold text-sky-700 dark:text-sky-300 flex items-center gap-1.5">
+                <Sparkles size={14} />
+                <span>Индекс структурирования: {organizationPercentage}%</span>
+              </div>
+              <p className="text-[11px] text-slate-600 dark:text-slate-300 leading-relaxed">
+                {organizationPercentage >= 80
+                  ? 'Превосходная организация! Ваши чаты чётко распределены, что ускоряет поиск нужной информации и снижает когнитивную нагрузку.'
+                  : organizationPercentage >= 50
+                  ? 'Хороший уровень структурированности. Рекомендуется распределить оставшиеся чаты по тематическим папкам.'
+                  : 'Большинство диалогов находятся вне папок. Настройте категории для комфортной навигации.'}
+              </p>
+            </div>
+
+            {/* Filter Tabs by Folder */}
+            <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar py-1">
+              <button
+                onClick={() => setSelectedFolderIdForDetails(null)}
+                className={`px-3 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap transition shrink-0 ${
+                  selectedFolderIdForDetails === null
+                    ? 'bg-sky-500 text-white shadow-xs'
+                    : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700'
+                }`}
+              >
+                Все категории
+              </button>
+              {folders.map((f) => (
+                <button
+                  key={f.id}
+                  onClick={() => setSelectedFolderIdForDetails(f.id)}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap transition shrink-0 ${
+                    selectedFolderIdForDetails === f.id
+                      ? 'bg-sky-500 text-white shadow-xs'
+                      : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700'
+                  }`}
+                >
+                  {f.name}
+                </button>
+              ))}
+              {uncategorizedContacts.length > 0 && (
+                <button
+                  onClick={() => setSelectedFolderIdForDetails('uncategorized')}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap transition shrink-0 ${
+                    selectedFolderIdForDetails === 'uncategorized'
+                      ? 'bg-amber-500 text-white shadow-xs'
+                      : 'bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700'
+                  }`}
+                >
+                  Без папки
+                </button>
+              )}
+            </div>
+
+            {/* Detail Breakdown View */}
+            <div className="space-y-3">
+              {(selectedFolderIdForDetails === null
+                ? folderStatsList
+                : folderStatsList.filter((item) => item.folder.id === selectedFolderIdForDetails)
+              ).map((item) => (
+                <div
+                  key={item.folder.id}
+                  className="p-3.5 rounded-2xl bg-white/60 dark:bg-slate-900/60 border border-slate-200/60 dark:border-slate-800/60 space-y-2.5"
+                >
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <div className={`h-7 w-7 rounded-lg ${item.theme.bg} ${item.theme.text} flex items-center justify-center font-bold border ${item.theme.border}`}>
+                        <Folder size={14} />
+                      </div>
+                      <div>
+                        <h4 className="text-xs font-extrabold text-primary">{item.folder.name}</h4>
+                        <div className="text-[10px] text-muted">{item.chatCount} диалогов в категории</div>
+                      </div>
+                    </div>
+                    <div className="text-right">
+                      <span className="text-xs font-bold text-sky-600 dark:text-sky-400">
+                        {totalMessagesInApp > 0 ? Math.round((item.messageCount / totalMessagesInApp) * 100) : 0}% сообщ.
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Sub-metrics breakdown */}
+                  <div className="grid grid-cols-3 gap-1.5 text-center text-[10px]">
+                    <div className="p-2 rounded-xl bg-slate-100/70 dark:bg-slate-800/70">
+                      <div className="font-bold text-primary">{item.dmsCount}</div>
+                      <div className="text-muted">Личные</div>
+                    </div>
+                    <div className="p-2 rounded-xl bg-slate-100/70 dark:bg-slate-800/70">
+                      <div className="font-bold text-primary">{item.groupsCount}</div>
+                      <div className="text-muted">Группы</div>
+                    </div>
+                    <div className="p-2 rounded-xl bg-slate-100/70 dark:bg-slate-800/70">
+                      <div className="font-bold text-primary">{item.channelsCount}</div>
+                      <div className="text-muted">Каналы</div>
+                    </div>
+                  </div>
+
+                  {/* List of contacts in this folder */}
+                  <div className="space-y-1.5 pt-1">
+                    <div className="text-[10px] font-bold text-muted uppercase tracking-wider">Чаты в этой папке:</div>
+                    {item.contacts.length === 0 ? (
+                      <div className="text-[11px] text-muted italic py-1">Папка пока пуста</div>
+                    ) : (
+                      item.contacts.map((c) => (
+                        <div
+                          key={c.id}
+                          className="flex items-center justify-between p-2 rounded-xl bg-slate-50/80 dark:bg-slate-950/40 border border-slate-200/40 dark:border-slate-800/40 text-xs"
+                        >
+                          <div className="flex items-center gap-2 truncate">
+                            <div className={`h-6 w-6 rounded-full bg-gradient-to-br ${c.color} text-white flex items-center justify-center text-[10px] font-bold shrink-0`}>
+                              {c.initials}
+                            </div>
+                            <span className="font-semibold text-primary truncate">{c.name}</span>
+                          </div>
+                          {c.unread > 0 && (
+                            <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-sky-500 text-white shrink-0">
+                              {c.unread}
+                            </span>
+                          )}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              ))}
+
+              {/* Uncategorized Details if selected */}
+              {(selectedFolderIdForDetails === null || selectedFolderIdForDetails === 'uncategorized') && uncategorizedContacts.length > 0 && (
+                <div className="p-3.5 rounded-2xl bg-amber-500/10 border border-amber-500/30 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <div className="h-7 w-7 rounded-lg bg-amber-500/20 text-amber-600 dark:text-amber-400 flex items-center justify-center font-bold">
+                        <FolderMinus size={14} />
+                      </div>
+                      <div>
+                        <h4 className="text-xs font-extrabold text-primary">Чаты без папки</h4>
+                        <div className="text-[10px] text-muted">{uncategorizedContacts.length} чатов вне категорий</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="space-y-1.5 pt-1">
+                    {uncategorizedContacts.map((c) => (
+                      <div
+                        key={c.id}
+                        className="flex items-center justify-between p-2 rounded-xl bg-white/60 dark:bg-slate-900/60 border border-amber-500/20 text-xs"
+                      >
+                        <div className="flex items-center gap-2 truncate">
+                          <div className={`h-6 w-6 rounded-full bg-gradient-to-br ${c.color} text-white flex items-center justify-center text-[10px] font-bold shrink-0`}>
+                            {c.initials}
+                          </div>
+                          <span className="font-semibold text-primary truncate">{c.name}</span>
+                        </div>
+                        <span className="text-[10px] text-amber-600 dark:text-amber-400 font-medium">Без категории</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Admin Panel Modal */}
       <AdminPanelModal
         isOpen={showAdminModal}
         onClose={() => setShowAdminModal(false)}
         currentUser={user || undefined}
       />
+
     </div>
   );
 };

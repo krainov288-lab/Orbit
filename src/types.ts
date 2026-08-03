@@ -93,12 +93,25 @@ export interface Contact {
   creatorId?: string;
   adminIds?: string[];
   moderatorIds?: string[];
+  slowMode?: number;
+  allowedReactions?: string[];
+  disableReactions?: boolean;
+  disableComments?: boolean;
+  disableForwarding?: boolean;
+  isMember?: boolean;
 }
-
 export interface MessageReactionInfo {
   count: number;
   userReacted?: boolean;
   users?: string[];
+}
+
+export interface MessageReplyInfo {
+  id: string;
+  text: string;
+  senderName: string;
+  mediaType?: string;
+  mediaUrl?: string;
 }
 
 export interface Message {
@@ -118,6 +131,11 @@ export interface Message {
   isEncrypted?: boolean;
   isRead?: boolean;
   reactions?: Record<string, MessageReactionInfo>;
+  replyTo?: MessageReplyInfo;
+  isForwarded?: boolean;
+  forwardedFrom?: string;
+  authorName?: string;
+  viewsCount?: number;
 }
 
 export interface Transaction {
@@ -181,6 +199,11 @@ export interface ChannelGroup {
   allowCalls?: boolean;
   slowMode?: number;
   signPosts?: boolean;
+  allowedReactions?: string[];
+  disableReactions?: boolean;
+  disableComments?: boolean;
+  disableForwarding?: boolean;
+  isMember?: boolean;
 }
 
 export interface AppNotification {
@@ -241,4 +264,55 @@ export interface SystemStats {
 }
 
 export type TabType = 'home' | 'ai' | 'wallet' | 'feed' | 'profile';
+
+export interface ChatFolder {
+  id: string;
+  name: string;
+  contactIds: string[];
+}
+
+export interface ChannelAnalyticsData {
+  summary: {
+    totalSubscribers: number;
+    subscriberGrowthNet: number;
+    subscriberGrowthPct: number;
+    totalViews: number;
+    viewsGrowthPct: number;
+    engagementRate: number;
+    avgReactionsPerPost: number;
+    totalPosts: number;
+    reachRate: number;
+  };
+  subscriberGrowthTrend: {
+    date: string;
+    subscribers: number;
+    joined: number;
+    left: number;
+  }[];
+  engagementMetrics: {
+    date: string;
+    views: number;
+    reactions: number;
+    comments: number;
+    shares: number;
+  }[];
+  hourlyActivity: {
+    hour: string;
+    activeUsers: number;
+    engagementRate: number;
+  }[];
+  interactionBreakdown: {
+    name: string;
+    value: number;
+    color: string;
+  }[];
+  topPosts: {
+    id: string;
+    title: string;
+    date: string;
+    views: number;
+    reactions: number;
+    comments: number;
+  }[];
+}
 

@@ -590,11 +590,11 @@ export const StoryViewer: React.FC<StoryViewerProps> = ({
           />
         )}
 
-        {/* Bottom-Left Compact Story Caption Bubble */}
+        {/* Bottom-Left Glassmorphic Story Caption Container */}
         {currentStory.caption && (
           <div
             onClick={(e) => e.stopPropagation()}
-            className="absolute bottom-16 left-4 z-30 max-w-[70%] text-white text-[11px] font-semibold leading-tight drop-shadow-[0_1.5px_4px_rgba(0,0,0,0.95)] [text-shadow:_0_1px_4px_rgba(0,0,0,0.95)] animate-fade-in"
+            className="absolute bottom-20 left-4 right-4 z-30 max-w-[85%] text-white text-xs font-medium leading-relaxed bg-black/60 backdrop-blur-md px-3.5 py-2 rounded-2xl border border-white/15 max-h-24 overflow-y-auto no-scrollbar shadow-lg animate-fade-in pointer-events-auto"
           >
             {currentStory.caption}
           </div>

@@ -132,6 +132,10 @@ export interface DBChannelGroup {
   slowMode?: number;
   signPosts?: boolean;
   pinnedMessageId?: string;
+  allowedReactions?: string[];
+  disableReactions?: boolean;
+  disableComments?: boolean;
+  disableForwarding?: boolean;
 }
 
 export interface DBNotification {
@@ -696,6 +700,18 @@ class Database {
     this.save();
   }
 
+  public deleteMessagesBetween(userId1: string, userId2: string): void {
+    if (!this.data.messages) return;
+    this.data.messages = this.data.messages.filter(
+      (m) =>
+        !(
+          (m.senderId === userId1 && m.recipientId === userId2) ||
+          (m.senderId === userId2 && m.recipientId === userId1)
+        )
+    );
+    this.save();
+  }
+
   // Message Operations
   public getMessagesBetween(userId1: string, userId2: string, limit: number = 50, beforeId?: string): DBMessage[] {
     let conversation = this.data.messages.filter(
@@ -756,9 +772,21 @@ class Database {
     if (updated) this.save();
   }
 
-  public toggleMessageReaction(messageId: string, userId: string, emoji: string): Record<string, string[]> | null {
-    const msg = this.data.messages.find((m) => m.id === messageId);
-    if (!msg) return null;
+  public toggleMessageReaction(messageId: string, userId: string, emoji: string): Record<string, string[]> {
+    let msg = this.data.messages.find((m) => m.id === messageId);
+    if (!msg) {
+      const newsItem = (this.data.news || []).find((n) => n.id === messageId);
+      msg = {
+        id: messageId,
+        senderId: newsItem?.userId || 'system',
+        recipientId: 'system',
+        text: newsItem?.title || '',
+        timestamp: Date.now(),
+        isRead: true,
+        reactions: {},
+      };
+      this.data.messages.push(msg);
+    }
     if (!msg.reactions) msg.reactions = {};
     if (!msg.reactions[emoji]) msg.reactions[emoji] = [];
 
@@ -877,10 +905,9 @@ class Database {
   public getChannelGroupsForUser(userId: string): DBChannelGroup[] {
     return (this.data.channelsGroups || []).filter(
       (cg) =>
-        cg.memberIds.includes(userId) ||
-        cg.adminIds.includes(userId) ||
-        cg.type === 'public_channel' ||
-        cg.type === 'public_group'
+        (cg.memberIds || []).includes(userId) ||
+        (cg.adminIds || []).includes(userId) ||
+        cg.creatorId === userId
     );
   }
 

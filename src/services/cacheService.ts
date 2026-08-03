@@ -131,6 +131,27 @@ class CacheService {
     }
   }
 
+  public clearAllCache(): void {
+    this.memoryCache.clear();
+    try {
+      Object.keys(localStorage).forEach((k) => {
+        if (k.startsWith(CACHE_PREFIX) || k.startsWith('orbit_')) {
+          localStorage.removeItem(k);
+        }
+      });
+    } catch {}
+    if (this.dbPromise) {
+      this.dbPromise.then((db) => {
+        if (!db) return;
+        try {
+          const tx = db.transaction('app_cache', 'readwrite');
+          const store = tx.objectStore('app_cache');
+          store.clear();
+        } catch {}
+      });
+    }
+  }
+
   // Specialized WhatsApp-like helpers
   public getCachedContacts(): any[] | null {
     return this.getSync<any[]>('contacts');

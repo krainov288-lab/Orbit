@@ -18,6 +18,8 @@ import {
   Flag,
   Ban,
   Loader2,
+  Maximize2,
+  ExternalLink,
 } from 'lucide-react';
 import { api } from '../../services/api';
 import { socketService } from '../../services/socket';
@@ -53,6 +55,7 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
   });
 
   const [activeNewsModal, setActiveNewsModal] = useState<NewsItem | null>(null);
+  const [fullScreenImage, setFullScreenImage] = useState<{ url: string; title?: string } | null>(null);
   const [activeMenuNewsId, setActiveMenuNewsId] = useState<string | null>(null);
   const [doubleTapHeart, setDoubleTapHeart] = useState<{ id: string; x: number; y: number } | null>(null);
   const lastTapMap = useRef<{ [key: string]: number }>({});
@@ -761,13 +764,27 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
                   </p>
                 </div>
 
-                {/* Media Attachment (Photo / Video) - ONLY IF mediaUrl exists! Zero empty frames when no photo */}
+                {/* Media Attachment (Photo / Video) - ONLY IF mediaUrl exists! Click photo to open full screen */}
                 {n.mediaUrl && (
-                  <div className="w-full h-48 sm:h-56 rounded-2xl overflow-hidden border border-slate-100 dark:border-slate-800 bg-slate-900 my-2.5">
+                  <div className="w-full h-48 sm:h-56 rounded-2xl overflow-hidden border border-slate-100 dark:border-slate-800 bg-slate-900 my-2.5 relative group">
                     {n.mediaType === 'video' ? (
                       <video src={n.mediaUrl} className="w-full h-full object-cover" muted />
                     ) : (
-                      <img src={n.mediaUrl} alt={n.title} className="w-full h-full object-cover" />
+                      <div
+                        className="w-full h-full cursor-pointer relative"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setFullScreenImage({ url: n.mediaUrl!, title: n.title });
+                        }}
+                      >
+                        <img src={n.mediaUrl} alt={n.title} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
+                        <div className="absolute inset-0 bg-black/20 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white">
+                          <div className="px-3 py-1.5 rounded-full bg-black/60 backdrop-blur-md text-[11px] font-semibold flex items-center gap-1.5 border border-white/20">
+                            <Maximize2 size={13} />
+                            <span>Открыть фото</span>
+                          </div>
+                        </div>
+                      </div>
                     )}
                   </div>
                 )}
@@ -896,11 +913,24 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
               </h2>
 
               {activeNewsModal.mediaUrl && (
-                <div className="w-full rounded-2xl overflow-hidden border border-slate-100 dark:border-slate-800 bg-black max-h-72">
+                <div className="w-full rounded-2xl overflow-hidden border border-slate-100 dark:border-slate-800 bg-black max-h-72 relative group">
                   {activeNewsModal.mediaType === 'video' ? (
                     <video src={activeNewsModal.mediaUrl} controls className="w-full h-full object-contain" />
                   ) : (
-                    <img src={activeNewsModal.mediaUrl} alt={activeNewsModal.title} className="w-full h-full object-cover" />
+                    <div
+                      className="w-full h-full cursor-pointer relative"
+                      onClick={() =>
+                        setFullScreenImage({ url: activeNewsModal.mediaUrl!, title: activeNewsModal.title })
+                      }
+                    >
+                      <img src={activeNewsModal.mediaUrl} alt={activeNewsModal.title} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
+                      <div className="absolute inset-0 bg-black/20 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white">
+                        <div className="px-3 py-1.5 rounded-full bg-black/60 backdrop-blur-md text-[11px] font-semibold flex items-center gap-1.5 border border-white/20">
+                          <Maximize2 size={13} />
+                          <span>Нажмите чтобы развернуть фото</span>
+                        </div>
+                      </div>
+                    </div>
                   )}
                 </div>
               )}
@@ -1225,6 +1255,51 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
                 Заблокировать
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Full-Screen Photo Modal Lightbox */}
+      {fullScreenImage && (
+        <div
+          className="fixed inset-0 z-[100000] bg-black/95 backdrop-blur-2xl flex flex-col items-center justify-between p-4 animate-fade-in select-none"
+          onClick={() => setFullScreenImage(null)}
+        >
+          <div className="w-full flex items-center justify-between text-white pt-2 px-2 max-w-5xl" onClick={(e) => e.stopPropagation()}>
+            <span className="text-xs font-semibold truncate max-w-[70%] text-slate-200">
+              {fullScreenImage.title || 'Просмотр фото'}
+            </span>
+            <div className="flex items-center gap-3">
+              <a
+                href={fullScreenImage.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="px-3 py-1.5 rounded-full bg-white/10 hover:bg-white/20 text-white transition text-xs font-medium flex items-center gap-1.5 border border-white/10"
+                title="Открыть оригинал"
+              >
+                <ExternalLink size={14} />
+                <span className="hidden sm:inline">Оригинал</span>
+              </a>
+              <button
+                onClick={() => setFullScreenImage(null)}
+                className="p-2 rounded-full bg-white/10 hover:bg-white/20 text-white transition border border-white/10"
+                title="Закрыть"
+              >
+                <X size={18} />
+              </button>
+            </div>
+          </div>
+
+          <div className="flex-1 flex items-center justify-center w-full max-w-5xl my-auto overflow-hidden p-2" onClick={(e) => e.stopPropagation()}>
+            <img
+              src={fullScreenImage.url}
+              alt={fullScreenImage.title || 'Фото'}
+              className="max-h-[85vh] max-w-full object-contain rounded-2xl shadow-2xl transition-all"
+            />
+          </div>
+
+          <div className="text-[11px] text-slate-400 pb-2">
+            Нажмите в любом месте для закрытия
           </div>
         </div>
       )}

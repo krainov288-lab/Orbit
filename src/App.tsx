@@ -291,6 +291,7 @@ export default function App() {
   const handleLogout = () => {
     api.clearToken();
     socketService.disconnect();
+    cacheService.clearAllCache();
     setUser(null);
     setActiveChat(null);
     setContacts([]);
@@ -481,7 +482,7 @@ export default function App() {
           ) : (
             <>
               {/* Offline & Outbox Sync Status Banner */}
-              <OfflineOutboxBar />
+              <OfflineOutboxBar isGuest={!user} />
 
               {/* Top Bar Navigation (Only shown for home and wallet screens) */}
               {user && (tab === 'home' || tab === 'wallet') && (
@@ -546,6 +547,7 @@ export default function App() {
                         onRefreshContacts={refreshData}
                         currentUser={user}
                         onOpenUserProfile={(id) => setActiveUserProfileId(id)}
+                        onOpenAuth={() => setIsAuthOpen(true)}
                       />
                     )}
 
@@ -559,6 +561,7 @@ export default function App() {
                         }}
                         isDark={isDark}
                         isGuest={!user}
+                        user={user}
                         onOpenAuth={() => setIsAuthOpen(true)}
                       />
                     )}

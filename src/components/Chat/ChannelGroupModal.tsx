@@ -19,9 +19,12 @@ import {
   Clock,
   Link,
   Share2,
+  BarChart2,
+  TrendingUp,
 } from 'lucide-react';
 import { ChannelGroup, User } from '../../types';
 import { api } from '../../services/api';
+import { ChannelAnalyticsDashboard } from './ChannelAnalyticsDashboard';
 
 interface ChannelGroupModalProps {
   channelGroupId: string;
@@ -42,7 +45,7 @@ export const ChannelGroupModal: React.FC<ChannelGroupModalProps> = ({
 }) => {
   const [loading, setLoading] = useState(true);
   const [cg, setCg] = useState<(ChannelGroup & { members?: any[] }) | null>(null);
-  const [activeTab, setActiveTab] = useState<'about' | 'members' | 'settings'>('about');
+  const [activeTab, setActiveTab] = useState<'about' | 'members' | 'analytics' | 'settings'>('about');
 
   // Edit states
   const [isEditing, setIsEditing] = useState(false);
@@ -51,6 +54,12 @@ export const ChannelGroupModal: React.FC<ChannelGroupModalProps> = ({
   const [editType, setEditType] = useState<any>('public_channel');
   const [editAllowCalls, setEditAllowCalls] = useState(true);
   const [editSlowMode, setEditSlowMode] = useState(0);
+  const [editDisableReactions, setEditDisableReactions] = useState(false);
+  const [editAllowedReactions, setEditAllowedReactions] = useState<string[]>(['❤️', '👍', '🔥', '😂', '😮']);
+  const [editDisableComments, setEditDisableComments] = useState(false);
+  const [editDisableForwarding, setEditDisableForwarding] = useState(false);
+
+  const AVAILABLE_EMOJIS = ['❤️', '👍', '🔥', '😂', '😮', '😢', '🙏', '🎉', '💯', '💩', '😍', '👏'];
 
   const [copied, setCopied] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -71,6 +80,10 @@ export const ChannelGroupModal: React.FC<ChannelGroupModalProps> = ({
       setEditType(data.type);
       setEditAllowCalls(data.allowCalls !== false);
       setEditSlowMode(data.slowMode || 0);
+      setEditDisableReactions(!!data.disableReactions);
+      setEditAllowedReactions(data.allowedReactions && data.allowedReactions.length > 0 ? data.allowedReactions : ['❤️', '👍', '🔥', '😂', '😮']);
+      setEditDisableComments(!!data.disableComments);
+      setEditDisableForwarding(!!data.disableForwarding);
     } catch (err: any) {
       console.error('Error loading channel details:', err);
       showToast('Не удалось загрузить данные канала');
@@ -121,6 +134,10 @@ export const ChannelGroupModal: React.FC<ChannelGroupModalProps> = ({
         type: editType,
         allowCalls: editAllowCalls,
         slowMode: editSlowMode,
+        disableReactions: editDisableReactions,
+        allowedReactions: editAllowedReactions,
+        disableComments: editDisableComments,
+        disableForwarding: editDisableForwarding,
       });
       if (res.success) {
         showToast('Настройки канала сохранены');
@@ -130,6 +147,22 @@ export const ChannelGroupModal: React.FC<ChannelGroupModalProps> = ({
       }
     } catch (err: any) {
       showToast(err.message || 'Ошибка при сохранении настроек');
+    }
+  };
+
+  const toggleEmojiAllowed = (emoji: string) => {
+    if (editAllowedReactions.includes(emoji)) {
+      if (editAllowedReactions.length === 1) {
+        showToast('Должна остаться хотя бы 1 реакция');
+        return;
+      }
+      setEditAllowedReactions(editAllowedReactions.filter((e) => e !== emoji));
+    } else {
+      if (editAllowedReactions.length >= 5) {
+        showToast('Можно выбрать не более 5 реакций');
+        return;
+      }
+      setEditAllowedReactions([...editAllowedReactions, emoji]);
     }
   };
 
@@ -198,7 +231,7 @@ export const ChannelGroupModal: React.FC<ChannelGroupModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-[99999] flex items-center justify-center bg-black/60 backdrop-blur-md p-3 sm:p-4 animate-fade-in">
-      <div className="relative w-full max-w-lg bg-white/95 dark:bg-slate-900/95 backdrop-blur-2xl border border-white/60 dark:border-slate-800 rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
+      <div className={`relative w-full ${activeTab === 'analytics' ? 'max-w-3xl' : 'max-w-lg'} bg-white/95 dark:bg-slate-900/95 backdrop-blur-2xl border border-white/60 dark:border-slate-800 rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh] transition-all duration-300`}>
         {/* Toast alert */}
         {toastMsg && (
           <div className="absolute top-3 left-1/2 -translate-x-1/2 z-[100] bg-slate-900 text-white text-xs px-4 py-2 rounded-full shadow-xl animate-fade-in">
@@ -235,12 +268,12 @@ export const ChannelGroupModal: React.FC<ChannelGroupModalProps> = ({
         </div>
 
         {/* Navigation Tabs */}
-        <div className="flex border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/50 px-4 shrink-0">
+        <div className="flex border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/50 px-4 shrink-0 overflow-x-auto no-scrollbar">
           <button
             onClick={() => setActiveTab('about')}
             className={`flex-1 py-3 text-xs font-semibold border-b-2 transition ${
               activeTab === 'about'
-                ? 'border-sky-500 text-sky-600 dark:text-sky-400'
+                ? 'border-sky-500 text-sky-600 dark:text-sky-400 font-bold'
                 : 'border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-300'
             }`}
           >
@@ -250,7 +283,7 @@ export const ChannelGroupModal: React.FC<ChannelGroupModalProps> = ({
             onClick={() => setActiveTab('members')}
             className={`flex-1 py-3 text-xs font-semibold border-b-2 transition ${
               activeTab === 'members'
-                ? 'border-sky-500 text-sky-600 dark:text-sky-400'
+                ? 'border-sky-500 text-sky-600 dark:text-sky-400 font-bold'
                 : 'border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-300'
             }`}
           >
@@ -258,10 +291,23 @@ export const ChannelGroupModal: React.FC<ChannelGroupModalProps> = ({
           </button>
           {canManage && (
             <button
+              onClick={() => setActiveTab('analytics')}
+              className={`flex-1 py-3 text-xs font-semibold border-b-2 transition flex items-center justify-center gap-1.5 ${
+                activeTab === 'analytics'
+                  ? 'border-sky-500 text-sky-600 dark:text-sky-400 font-bold'
+                  : 'border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-300'
+              }`}
+            >
+              <BarChart2 size={14} />
+              <span>Аналитика</span>
+            </button>
+          )}
+          {canManage && (
+            <button
               onClick={() => setActiveTab('settings')}
               className={`flex-1 py-3 text-xs font-semibold border-b-2 transition ${
                 activeTab === 'settings'
-                  ? 'border-sky-500 text-sky-600 dark:text-sky-400'
+                  ? 'border-sky-500 text-sky-600 dark:text-sky-400 font-bold'
                   : 'border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-300'
               }`}
             >
@@ -272,6 +318,9 @@ export const ChannelGroupModal: React.FC<ChannelGroupModalProps> = ({
 
         {/* Content Body */}
         <div className="p-5 overflow-y-auto space-y-5 flex-1 text-sm text-slate-700 dark:text-slate-200">
+          {activeTab === 'analytics' && canManage && (
+            <ChannelAnalyticsDashboard channelGroup={cg} />
+          )}
           {activeTab === 'about' && (
             <div className="space-y-4 animate-fade-in">
               {/* Description */}
@@ -504,8 +553,99 @@ export const ChannelGroupModal: React.FC<ChannelGroupModalProps> = ({
                       <option value={10}>10 секунд</option>
                       <option value={30}>30 секунд</option>
                       <option value={60}>1 минута</option>
+                      <option value={300}>5 минут</option>
+                      <option value={900}>15 минут</option>
                     </select>
                   </div>
+                </div>
+
+                {/* Reactions Settings */}
+                <div className="p-3.5 rounded-2xl bg-slate-100/70 dark:bg-slate-800/60 border border-slate-200/50 dark:border-slate-700/50 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="text-xs font-semibold text-slate-800 dark:text-slate-100">Реакции на сообщения</div>
+                      <div className="text-[11px] text-slate-500 dark:text-slate-400">Разрешить участникам ставить эмодзи-реакции</div>
+                    </div>
+                    <label className="relative inline-flex items-center cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={!editDisableReactions}
+                        onChange={(e) => setEditDisableReactions(!e.target.checked)}
+                        className="sr-only peer"
+                      />
+                      <div className="w-9 h-5 bg-slate-300 peer-focus:outline-none rounded-full peer dark:bg-slate-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all dark:border-slate-600 peer-checked:bg-sky-500"></div>
+                    </label>
+                  </div>
+
+                  {!editDisableReactions && (
+                    <div className="pt-2 border-t border-slate-200/60 dark:border-slate-700/60">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-[11px] font-medium text-slate-500 dark:text-slate-400">Выбор доступных реакций (макс. 5):</span>
+                        <span className="text-[11px] font-bold text-sky-500">{editAllowedReactions.length} / 5</span>
+                      </div>
+                      <div className="flex flex-wrap gap-1.5">
+                        {AVAILABLE_EMOJIS.map((emoji) => {
+                          const isSelected = editAllowedReactions.includes(emoji);
+                          return (
+                            <button
+                              key={emoji}
+                              type="button"
+                              onClick={() => toggleEmojiAllowed(emoji)}
+                              className={`w-9 h-9 text-base rounded-xl flex items-center justify-center transition active:scale-95 ${
+                                isSelected
+                                  ? 'bg-sky-100 dark:bg-sky-900/50 border-2 border-sky-500 text-slate-900 dark:text-white shadow-sm'
+                                  : 'bg-white dark:bg-slate-700/60 border border-slate-200 dark:border-slate-700 opacity-60 hover:opacity-100'
+                              }`}
+                            >
+                              {emoji}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Comments / Discussion Toggle */}
+                <div className="flex items-center justify-between p-3.5 rounded-2xl bg-slate-100/70 dark:bg-slate-800/60 border border-slate-200/50 dark:border-slate-700/50">
+                  <div>
+                    <div className="text-xs font-semibold text-slate-800 dark:text-slate-100">
+                      {isChannel ? 'Комментарии к публикациям' : 'Ответы в ветках и обсуждения'}
+                    </div>
+                    <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                      {isChannel ? 'Разрешить обсуждения записей под постами' : 'Разрешить участникам отвечать на сообщения'}
+                    </div>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={!editDisableComments}
+                      onChange={(e) => setEditDisableComments(!e.target.checked)}
+                      className="sr-only peer"
+                    />
+                    <div className="w-9 h-5 bg-slate-300 peer-focus:outline-none rounded-full peer dark:bg-slate-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all dark:border-slate-600 peer-checked:bg-sky-500"></div>
+                  </label>
+                </div>
+
+                {/* Forwarding Toggle */}
+                <div className="flex items-center justify-between p-3.5 rounded-2xl bg-slate-100/70 dark:bg-slate-800/60 border border-slate-200/50 dark:border-slate-700/50">
+                  <div>
+                    <div className="text-xs font-semibold text-slate-800 dark:text-slate-100">
+                      Разрешить пересылку сообщений
+                    </div>
+                    <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                      Позволяет участникам копировать и пересылать посты
+                    </div>
+                  </div>
+                  <label className="relative inline-flex items-center cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={!editDisableForwarding}
+                      onChange={(e) => setEditDisableForwarding(!e.target.checked)}
+                      className="sr-only peer"
+                    />
+                    <div className="w-9 h-5 bg-slate-300 peer-focus:outline-none rounded-full peer dark:bg-slate-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all dark:border-slate-600 peer-checked:bg-sky-500"></div>
+                  </label>
                 </div>
 
                 {!isChannel && (

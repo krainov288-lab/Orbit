@@ -27,12 +27,12 @@ class OfflineOutboxService {
         this.processQueue();
       });
 
-      // Auto-check connection every 15s
+      // Auto-check connection every 10s
       setInterval(() => {
         if (navigator.onLine && this.getPendingCount() > 0 && !this.isProcessing) {
           this.processQueue();
         }
-      }, 15000);
+      }, 10000);
     }
   }
 
@@ -41,6 +41,13 @@ class OfflineOutboxService {
       const raw = localStorage.getItem(OUTBOX_STORAGE_KEY);
       if (raw) {
         this.queue = JSON.parse(raw);
+        // Reset stuck 'syncing' items or broken legacy function errors back to 'pending'
+        this.queue.forEach((item) => {
+          if (item.status === 'syncing' || (item.errorMsg && item.errorMsg.includes('not a function'))) {
+            item.status = 'pending';
+            delete item.errorMsg;
+          }
+        });
       }
     } catch (e) {
       this.queue = [];
@@ -77,7 +84,7 @@ class OfflineOutboxService {
   }
 
   public getPendingCount(): number {
-    return this.queue.filter((item) => item.status !== 'syncing').length;
+    return this.queue.filter((item) => item.status !== 'error').length;
   }
 
   /**
@@ -88,6 +95,20 @@ class OfflineOutboxService {
     title: string,
     payload: any
   ): OutboxItem {
+    // Check if guest mode
+    const token = typeof window !== 'undefined' ? localStorage.getItem('orbit_jwt_token') : null;
+    if (!token && (type === 'news_post' || type === 'reel')) {
+      console.log('[OfflineOutbox] News queuing skipped in Guest mode');
+      return {
+        id: 'outbox_guest_ignored',
+        type,
+        title,
+        payload,
+        createdAt: Date.now(),
+        status: 'pending',
+      };
+    }
+
     const item: OutboxItem = {
       id: 'outbox_' + Date.now() + '_' + Math.random().toString(36).substring(2, 7),
       type,
@@ -103,7 +124,7 @@ class OfflineOutboxService {
 
     // Attempt processing immediately if online
     if (this.isOnline()) {
-      setTimeout(() => this.processQueue(), 200);
+      setTimeout(() => this.processQueue(), 300);
     }
 
     return item;
@@ -128,7 +149,6 @@ class OfflineOutboxService {
     this.isProcessing = true;
     this.notifyListeners();
 
-    // Dynamically import api if not passed
     let currentApi = apiInstance;
     if (!currentApi) {
       try {
@@ -141,34 +161,54 @@ class OfflineOutboxService {
       }
     }
 
-    const pending = this.queue.filter((item) => item.status === 'pending');
+    const token = typeof window !== 'undefined' ? localStorage.getItem('orbit_jwt_token') : null;
+    const toProcess = this.queue.filter((item) => item.status === 'pending');
 
-    for (const item of pending) {
+    for (const item of toProcess) {
       if (!this.isOnline()) break;
+
+      // Skip news in Guest mode
+      if (!token && (item.type === 'news_post' || item.type === 'reel')) {
+        this.removeItem(item.id);
+        continue;
+      }
 
       item.status = 'syncing';
       this.saveToStorage();
 
       try {
         if (item.type === 'chat_message' || item.type === 'voice_note' || item.type === 'video_circle') {
-          const { recipientId, text, mediaUrl, mediaType, voiceDuration, replyTo } = item.payload;
-          await currentApi.sendMessage(recipientId, text, mediaUrl, mediaType, voiceDuration, replyTo);
+          const { recipientId, text, mediaUrl, mediaType, voiceDuration, replyTo, amount, tx } = item.payload;
+          if (typeof currentApi.sendMessage === 'function') {
+            await currentApi.sendMessage(recipientId, {
+              text: text || '',
+              mediaUrl,
+              mediaType,
+              voiceDuration,
+              replyTo,
+              amount,
+              tx,
+            });
+          }
         } else if (item.type === 'story') {
-          const { imageUrl, caption, options } = item.payload;
-          await currentApi.createStory(imageUrl, caption, options);
-        } else if (item.type === 'news_post') {
-          const { title, summary, content, category, imageUrl, videoUrl, audioUrl, isReel, channelId } = item.payload;
-          await currentApi.createNewsItem({
-            title,
-            summary,
-            content,
-            category,
-            imageUrl,
-            videoUrl,
-            audioUrl,
-            isReel,
-            channelId,
-          });
+          const { imageUrl, mediaUrl, caption, options } = item.payload;
+          if (typeof currentApi.createStory === 'function') {
+            await currentApi.createStory(imageUrl || mediaUrl, caption, options);
+          }
+        } else if (item.type === 'news_post' || item.type === 'reel') {
+          const { title, content, summary, category, imageUrl, mediaUrl, mediaType, videoUrl, audioUrl, isReel, tag, accent } = item.payload;
+          if (typeof currentApi.createNews === 'function') {
+            await currentApi.createNews(title || 'Новость', content || '', {
+              summary,
+              category,
+              mediaUrl: mediaUrl || imageUrl,
+              mediaType,
+              videoUrl,
+              isReel: isReel || item.type === 'reel',
+              tag,
+              accent,
+            });
+          }
         }
 
         // Successfully synced!
