@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../../services/api';
 import { Contact } from '../../types';
+import { Skeleton, SkeletonAvatar } from '../Common/Skeleton';
 import {
   X,
   MessageSquare,
@@ -164,9 +165,21 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
 
         {/* Content Body */}
         {loading ? (
-          <div className="p-12 flex flex-col items-center justify-center gap-3 text-slate-400">
-            <div className="h-8 w-8 border-2 border-sky-500 border-t-transparent rounded-full animate-spin" />
-            <span className="text-xs font-medium">Загрузка профиля...</span>
+          <div className="p-6 space-y-4 animate-fade-in">
+            <div className="flex flex-col items-center justify-center text-center gap-2.5 p-4 rounded-2xl bg-white/40 dark:bg-slate-900/40 border border-slate-100 dark:border-slate-800">
+              <SkeletonAvatar size="xl" />
+              <Skeleton className="h-4 w-32 rounded-md" />
+              <Skeleton className="h-3 w-24 rounded-md" />
+              <div className="flex items-center gap-2 pt-2 w-full max-w-xs">
+                <Skeleton className="h-9 flex-1 rounded-2xl" />
+                <Skeleton className="h-9 flex-1 rounded-2xl" />
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Skeleton className="h-10 w-full rounded-xl" />
+              <Skeleton className="h-10 w-full rounded-xl" />
+              <Skeleton className="h-10 w-full rounded-xl" />
+            </div>
           </div>
         ) : !profile ? (
           <div className="p-8 text-center text-slate-400 text-xs">Не удалось загрузить данные пользователя</div>

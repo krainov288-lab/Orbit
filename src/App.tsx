@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { Phone, PhoneOff, Radio } from 'lucide-react';
 import { User, Contact, NewsItem, AppNotification, TabType, CallType } from './types';
@@ -18,6 +18,7 @@ import { FeedScreen } from './components/Feed/FeedScreen';
 import { ProfileScreen } from './components/Profile/ProfileScreen';
 import { UserProfileModal } from './components/Profile/UserProfileModal';
 import { ChannelGroupModal } from './components/Chat/ChannelGroupModal';
+import { CallOverlayModal } from './components/Chat/CallOverlayModal';
 import { PinSetupModal } from './components/Security/PinSetupModal';
 import { PinRecoveryModal } from './components/Security/PinRecoveryModal';
 import { PinLockOverlay } from './components/Security/PinLockOverlay';
@@ -25,6 +26,10 @@ import { PinLockOverlay } from './components/Security/PinLockOverlay';
 export default function App() {
   const [tab, setTab] = useState<TabType>('home');
   const [activeChat, setActiveChat] = useState<Contact | null>(null);
+  const activeChatRef = useRef<Contact | null>(activeChat);
+  useEffect(() => {
+    activeChatRef.current = activeChat;
+  }, [activeChat]);
   const [user, setUser] = useState<User | null>(() => cacheService.getSync<User>('current_user'));
   const [contacts, setContacts] = useState<Contact[]>(() => cacheService.getCachedContacts() || []);
   const [news, setNews] = useState<NewsItem[]>(() => cacheService.getCachedNews() || []);
@@ -35,6 +40,7 @@ export default function App() {
   const [aiInitialPrompt, setAiInitialPrompt] = useState<string | undefined>();
   const [aiInitialAction, setAiInitialAction] = useState<string | undefined>();
   const [activeUserProfileId, setActiveUserProfileId] = useState<string | null>(null);
+  const [isSearchModalOpen, setIsSearchModalOpen] = useState(false);
 
   // PIN & Security State
   const [storedPin, setStoredPin] = useState('');
@@ -44,6 +50,7 @@ export default function App() {
 
   const [isPinSetupOpen, setIsPinSetupOpen] = useState(false);
   const [isPinRecoveryOpen, setIsPinRecoveryOpen] = useState(false);
+  const [isServerLoading, setIsServerLoading] = useState(true);
 
   const [pushToast, setPushToast] = useState<{
     senderName: string;
@@ -57,6 +64,12 @@ export default function App() {
     caller: any;
     callType: CallType;
     channelId?: string;
+  } | null>(null);
+
+  const [activeCall, setActiveCall] = useState<{
+    contact: Contact;
+    callType: CallType;
+    isIncoming?: boolean;
   } | null>(null);
 
   const handleOpenAI = (prompt?: string, actionLabel?: string) => {
@@ -128,29 +141,62 @@ export default function App() {
   };
 
   const refreshData = useCallback(async () => {
+    setIsServerLoading(true);
     try {
-      if (api.getToken()) {
-        const u = await api.getCurrentUser().catch(() => null);
-        setUser(u);
-
-        if (u) {
-          const [cList, txList, notifList] = await Promise.all([
-            api.getContacts().catch(() => []),
-            api.getTransactions().catch(() => []),
-            api.getNotifications().catch(() => []),
-          ]);
-          setContacts(cList);
-          setTransactions(txList);
-
-          const dismissed = getDismissedNotifIds();
-          setNotifications((notifList || []).filter((n: AppNotification) => !dismissed.includes(n.id)));
+      let u: User | null = null;
+      const token = api.getToken();
+      if (token) {
+        try {
+          u = await api.getCurrentUser();
+        } catch (err) {
+          console.warn('Persistence check failed for stored token:', err);
+          // Token is invalid/expired - explicitly clear token and local storage to prevent auto-login as guest bug
+          api.clearToken();
+          cacheService.clearAllCache();
+          setUser(null);
+          setContacts([]);
+          setTransactions([]);
+          setNotifications([]);
+          setIsAuthOpen(true);
+          return;
         }
       }
 
-      const newsList = await api.getNews().catch(() => []);
+      setUser(u);
+
+      if (u) {
+        const [cList, txList, notifList] = await Promise.all([
+          api.getContacts().catch(() => cacheService.getCachedContacts() || []),
+          api.getTransactions().catch(() => []),
+          api.getNotifications().catch(() => []),
+        ]);
+        setContacts(cList);
+        setTransactions(txList);
+
+        const dismissed = getDismissedNotifIds();
+        const currentChat = activeChatRef.current;
+        setNotifications(
+          (notifList || []).filter((n: AppNotification) => {
+            if (dismissed.includes(n.id)) return false;
+            if (
+              currentChat &&
+              ((n.senderId && String(currentChat.id) === String(n.senderId)) ||
+                (n.channelGroupId && String(currentChat.id) === String(n.channelGroupId)) ||
+                (n.title && (currentChat.name === n.title || currentChat.handle === n.title)))
+            ) {
+              return false;
+            }
+            return true;
+          })
+        );
+      }
+
+      const newsList = await api.getNews().catch(() => cacheService.getCachedNews() || []);
       setNews(newsList);
     } catch (err) {
       console.error('Data refresh error:', err);
+    } finally {
+      setIsServerLoading(false);
     }
   }, [user?.email]);
 
@@ -171,10 +217,11 @@ export default function App() {
           return;
         }
 
+        const currentChat = activeChatRef.current;
         const isCurrentActiveChat =
-          activeChat &&
-          (String(activeChat.id) === String(data.senderId) ||
-            String(activeChat.id) === String(data.channelGroupId));
+          currentChat &&
+          (String(currentChat.id) === String(data.senderId) ||
+            String(currentChat.id) === String(data.channelGroupId));
 
         if (!isCurrentActiveChat) {
           const targetId = data.channelGroupId || data.senderId;
@@ -189,6 +236,14 @@ export default function App() {
         refreshData();
       });
 
+      const unsubCgCreated = socketService.subscribe('channel_group_created', () => {
+        refreshData();
+      });
+
+      const unsubCgUpdated = socketService.subscribe('channel_group_updated', () => {
+        refreshData();
+      });
+
       const unsubCgDeleted = socketService.subscribe('channel_group_deleted', (data) => {
         if (data.id) {
           setActiveChat((prev) => (prev && String(prev.id) === String(data.id) ? null : prev));
@@ -198,7 +253,17 @@ export default function App() {
 
       const unsubNotif = socketService.subscribe('push_notification', (data) => {
         if (data.notification) {
-          setNotifications((prev) => [data.notification, ...prev]);
+          const notif = data.notification;
+          const currentChat = activeChatRef.current;
+          const isCurrentActiveChat =
+            currentChat &&
+            ((notif.senderId && String(currentChat.id) === String(notif.senderId)) ||
+              (notif.channelGroupId && String(currentChat.id) === String(notif.channelGroupId)) ||
+              (notif.title && (currentChat.name === notif.title || currentChat.handle === notif.title)));
+
+          if (!isCurrentActiveChat) {
+            setNotifications((prev) => [notif, ...prev]);
+          }
         }
       });
 
@@ -211,7 +276,14 @@ export default function App() {
 
       const unsubUserUpdated = socketService.subscribe('user_updated', (data) => {
         if (data.user) {
-          setUser((prev) => (prev && prev.id === data.user.id ? { ...prev, ...data.user } : prev));
+          setUser((prev) => {
+            if (prev && prev.id === data.user.id) {
+              const updated = { ...prev, ...data.user };
+              cacheService.set('current_user', updated);
+              return updated;
+            }
+            return prev;
+          });
           setContacts((prev) => {
             const updated = prev.map((c) =>
               c.id === data.user.id
@@ -276,6 +348,8 @@ export default function App() {
 
       return () => {
         unsubMsg();
+        unsubCgCreated();
+        unsubCgUpdated();
         unsubCgDeleted();
         unsubNotif();
         unsubBal();
@@ -288,13 +362,56 @@ export default function App() {
     }
   }, [user, refreshData]);
 
+  const handleUpdateContact = (updatedContact: Contact) => {
+    setContacts((prev) => {
+      const updated = prev.map((c) => (c.id === updatedContact.id ? updatedContact : c));
+      cacheService.setCachedContacts(updated);
+      return updated;
+    });
+    if (activeChat && activeChat.id === updatedContact.id) {
+      setActiveChat(updatedContact);
+    }
+  };
+
+  const handleUpdateUser = (updatedUser: User) => {
+    setUser(updatedUser);
+    cacheService.set('current_user', updatedUser);
+    setContacts((prev) => {
+      const updated = prev.map((c) =>
+        c.id === updatedUser.id
+          ? {
+              ...c,
+              name: updatedUser.username,
+              avatarUrl: updatedUser.avatarUrl,
+              initials: updatedUser.initials,
+              handle: updatedUser.handle,
+            }
+          : c
+      );
+      cacheService.setCachedContacts(updated);
+      return updated;
+    });
+  };
+
+  const handleDeleteNews = (newsId: string) => {
+    setNews((prev) => {
+      const updated = prev.filter((n) => n.id !== newsId);
+      cacheService.setCachedNews(updated);
+      return updated;
+    });
+  };
+
   const handleLogout = () => {
     api.clearToken();
     socketService.disconnect();
     cacheService.clearAllCache();
     setUser(null);
     setActiveChat(null);
+    setActiveCall(null);
     setContacts([]);
+    setTransactions([]);
+    setNotifications([]);
+    setIsAuthOpen(true);
   };
 
   const handleLockApp = () => {
@@ -477,6 +594,10 @@ export default function App() {
                 user={user}
                 onOpenAuth={() => setIsAuthOpen(true)}
                 onOpenUserProfile={(id) => setActiveUserProfileId(id)}
+                onUpdateContact={handleUpdateContact}
+                onInitiateCall={(contact, type) => {
+                  setActiveCall({ contact, callType: type, isIncoming: false });
+                }}
               />
             </div>
           ) : (
@@ -492,6 +613,7 @@ export default function App() {
                   isPinSet={!!storedPin}
                   onNavigateProfile={() => setTab('profile')}
                   onSettings={() => setTab('profile')}
+                  onOpenSearch={() => setIsSearchModalOpen(true)}
                   onLogout={handleLogout}
                   onOpenAuth={() => setIsAuthOpen(true)}
                   onOpenPinSetup={() => setIsPinSetupOpen(true)}
@@ -524,10 +646,10 @@ export default function App() {
                 <AnimatePresence mode="wait">
                   <motion.div
                     key={tab}
-                    initial={{ opacity: 0, y: 8 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: -8 }}
-                    transition={{ duration: 0.18, ease: 'easeOut' }}
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    transition={{ duration: 0.15, ease: 'easeOut' }}
                     className="h-full w-full flex flex-col"
                   >
                     {tab === 'home' && (
@@ -544,10 +666,13 @@ export default function App() {
                         }}
                         onAskAI={handleOpenAI}
                         isDark={isDark}
+                        isLoading={isServerLoading}
                         onRefreshContacts={refreshData}
                         currentUser={user}
                         onOpenUserProfile={(id) => setActiveUserProfileId(id)}
                         onOpenAuth={() => setIsAuthOpen(true)}
+                        isSearchOpen={isSearchModalOpen}
+                        onCloseSearch={() => setIsSearchModalOpen(false)}
                       />
                     )}
 
@@ -574,6 +699,7 @@ export default function App() {
                         setTab={setTab}
                         onRefreshBalance={refreshData}
                         isDark={isDark}
+                        isLoading={isServerLoading}
                         isGuest={!user}
                         onOpenAuth={() => setIsAuthOpen(true)}
                       />
@@ -587,6 +713,7 @@ export default function App() {
                         isGuest={!user}
                         onOpenAuth={() => setIsAuthOpen(true)}
                         onAddNews={(item) => setNews((prev) => [item, ...prev])}
+                        onDeleteNews={handleDeleteNews}
                       />
                     )}
 
@@ -595,11 +722,13 @@ export default function App() {
                         user={user}
                         contacts={contacts}
                         isDark={isDark}
+                        isLoading={isServerLoading}
                         isPinSet={!!storedPin}
                         onOpenPinSetup={() => setIsPinSetupOpen(true)}
                         onToggleDarkMode={() => setIsDark(!isDark)}
                         onLogout={handleLogout}
                         onOpenAuth={() => setIsAuthOpen(true)}
+                        onUpdateUser={handleUpdateUser}
                         onTriggerTestNotification={handleTriggerTestNotification}
                       />
                     )}
@@ -669,8 +798,24 @@ export default function App() {
                 setActiveChat(c);
                 setTab('home');
               }}
+              onTriggerCall={(contact) => {
+                setActiveUserProfileId(null);
+                setActiveCall({ contact, callType: 'voice', isIncoming: false });
+              }}
             />
           )
+        )}
+
+        {/* Encrypted Active Voice / Video Call Overlay */}
+        {activeCall && (
+          <CallOverlayModal
+            isOpen={!!activeCall}
+            onClose={() => setActiveCall(null)}
+            contact={activeCall.contact}
+            callType={activeCall.callType}
+            isIncoming={activeCall.isIncoming}
+            currentUserId={user?.id}
+          />
         )}
 
         {/* Real-time Incoming Call Banner */}
@@ -721,6 +866,11 @@ export default function App() {
                       isOnline: true,
                     };
                     socketService.emit('accept_call', { callerId: incomingCall.caller.id });
+                    setActiveCall({
+                      contact: targetContact,
+                      callType: incomingCall.callType || 'voice',
+                      isIncoming: true,
+                    });
                     setActiveChat(targetContact);
                     setIncomingCall(null);
                   }}

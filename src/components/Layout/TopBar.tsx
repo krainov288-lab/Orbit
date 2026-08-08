@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
-  Settings,
+  Search,
   Bell,
   Lock,
   User as UserIcon,
@@ -22,6 +22,7 @@ interface TopBarProps {
   isPinSet: boolean;
   onNavigateProfile: () => void;
   onSettings: () => void;
+  onOpenSearch?: () => void;
   onLogout: () => void;
   onOpenAuth: () => void;
   onOpenPinSetup: () => void;
@@ -37,6 +38,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   isPinSet,
   onNavigateProfile,
   onSettings,
+  onOpenSearch,
   onLogout,
   onOpenAuth,
   onOpenPinSetup,
@@ -136,19 +138,21 @@ export const TopBar: React.FC<TopBarProps> = ({
 
       {/* Right: Settings, Notifications, Lock Button */}
       <div className="flex items-center gap-2">
-        {/* Settings Button */}
+        {/* Search Contacts, Groups & Channels Button */}
         <button
           onClick={() => {
             if (!user) {
               onOpenAuth();
+            } else if (onOpenSearch) {
+              onOpenSearch();
             } else {
               onSettings();
             }
           }}
           className="glass-button h-9 w-9 rounded-full flex items-center justify-center active:scale-95 transition"
-          title="Настройки"
+          title="Поиск по контактам, группам и каналам"
         >
-          <Settings size={16} className="text-secondary" />
+          <Search size={16} className="text-secondary" />
         </button>
 
         {/* Notifications Button */}

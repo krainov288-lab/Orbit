@@ -135,7 +135,13 @@ class CacheService {
     this.memoryCache.clear();
     try {
       Object.keys(localStorage).forEach((k) => {
-        if (k.startsWith(CACHE_PREFIX) || k.startsWith('orbit_')) {
+        if (
+          (k.startsWith(CACHE_PREFIX) || k.startsWith('orbit_')) &&
+          k !== 'orbit_jwt_token' &&
+          !k.startsWith('orbit_app_lang') &&
+          !k.startsWith('orbit_theme_') &&
+          !k.startsWith('orbit_hide_read_receipts')
+        ) {
           localStorage.removeItem(k);
         }
       });
@@ -162,19 +168,53 @@ class CacheService {
   }
 
   public getCachedNews(): any[] | null {
-    return this.getSync<any[]>('news');
+    const memory = this.getSync<any[]>('news');
+    if (memory && Array.isArray(memory)) return memory;
+    if (typeof window !== 'undefined') {
+      try {
+        const raw = localStorage.getItem('orbit_news_cache');
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) return parsed;
+        }
+      } catch {}
+    }
+    return null;
   }
 
   public setCachedNews(news: any[]): void {
+    if (!Array.isArray(news)) return;
     this.set('news', news);
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem('orbit_news_cache', JSON.stringify(news));
+      } catch {}
+    }
   }
 
   public getCachedStories(): any[] | null {
-    return this.getSync<any[]>('stories');
+    const memory = this.getSync<any[]>('stories');
+    if (memory && Array.isArray(memory)) return memory;
+    if (typeof window !== 'undefined') {
+      try {
+        const raw = localStorage.getItem('orbit_stories_cache');
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) return parsed;
+        }
+      } catch {}
+    }
+    return null;
   }
 
   public setCachedStories(stories: any[]): void {
+    if (!Array.isArray(stories)) return;
     this.set('stories', stories);
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem('orbit_stories_cache', JSON.stringify(stories));
+      } catch {}
+    }
   }
 
   public getCachedMessages(contactId: string): any[] | null {

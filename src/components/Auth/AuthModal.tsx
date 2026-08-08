@@ -443,8 +443,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ isOpen, onClose, onSuccess
     <div className="fixed inset-0 z-[100000] flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-md transition-all animate-fade-in text-slate-800 dark:text-slate-100 overflow-y-auto">
       {/* Toast Banner */}
       {toastMessage && (
-        <div className="fixed top-5 left-1/2 -translate-x-1/2 z-50 bg-slate-800 dark:bg-slate-200 text-white dark:text-slate-900 text-xs font-semibold px-4 py-2.5 rounded-full shadow-xl flex items-center gap-2 border border-slate-700 dark:border-slate-300 animate-bounce max-w-sm text-center">
-          <KeyRound size={16} className="shrink-0" />
+        <div className="fixed top-5 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-2xl bg-white/80 dark:bg-slate-900/80 backdrop-blur-md border border-slate-200/60 dark:border-slate-800/60 text-slate-600 dark:text-slate-300 text-xs font-medium shadow-xl text-center whitespace-nowrap animate-fade-in max-w-sm pointer-events-none">
           <span>{toastMessage}</span>
         </div>
       )}

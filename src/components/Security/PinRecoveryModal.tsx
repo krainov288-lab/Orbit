@@ -86,8 +86,7 @@ export const PinRecoveryModal: React.FC<PinRecoveryModalProps> = ({
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-md animate-fade-in text-primary">
       {/* Toast Alert */}
       {toastMessage && (
-        <div className="fixed top-5 left-1/2 -translate-x-1/2 z-50 glass-card bg-blue-500/20 text-blue-500 text-xs font-semibold px-4 py-2.5 rounded-full shadow-2xl flex items-center gap-2 border border-blue-500/30">
-          <KeyRound size={16} />
+        <div className="fixed top-5 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-2xl bg-white/80 dark:bg-slate-900/80 backdrop-blur-md border border-slate-200/60 dark:border-slate-800/60 text-slate-600 dark:text-slate-300 text-xs font-medium shadow-xl text-center whitespace-nowrap animate-fade-in pointer-events-none">
           <span>{toastMessage}</span>
         </div>
       )}

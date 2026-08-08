@@ -1,4 +1,4 @@
-import { User, Contact, Message, MessageReactionInfo, Transaction, NewsItem, NewsComment, ChannelGroup, ChannelGroupType, AppNotification, SystemAnnouncement, AdminReport, AuditLogItem, SystemStats, UserRole, Story, StoryReaction, StoryComment, ChannelAnalyticsData } from '../types';
+import { User, Contact, Message, MessageReactionInfo, Transaction, NewsItem, NewsComment, ChannelGroup, ChannelGroupType, AppNotification, SystemAnnouncement, AdminReport, AuditLogItem, SystemStats, UserRole, Story, StoryReaction, StoryComment, ChannelAnalyticsData, FollowerGroup } from '../types';
 import { cacheService } from './cacheService';
 import { offlineOutbox } from './offlineOutbox';
 
@@ -30,14 +30,28 @@ async function apiRequest<T>(endpoint: string, options: RequestInit = {}): Promi
     headers['Authorization'] = `Bearer ${token}`;
   }
 
+  if (typeof window !== 'undefined' && localStorage.getItem('orbit_hide_read_receipts') === 'true') {
+    headers['x-hide-read-receipts'] = 'true';
+  }
+
   const res = await fetch(endpoint, {
     ...options,
     headers,
   });
 
+  const contentType = res.headers.get('content-type') || '';
+
   if (!res.ok) {
-    const errorData = await res.json().catch(() => ({ error: 'Request failed' }));
-    throw new Error(errorData.error || `HTTP error! status: ${res.status}`);
+    let errorMsg = `HTTP error! status: ${res.status}`;
+    if (contentType.includes('application/json')) {
+      const errorData = await res.json().catch(() => null);
+      if (errorData?.error) errorMsg = errorData.error;
+    }
+    throw new Error(errorMsg);
+  }
+
+  if (!contentType.includes('application/json')) {
+    throw new Error(`Server returned non-JSON response for ${endpoint}`);
   }
 
   return res.json();
@@ -65,6 +79,20 @@ export const api = {
       body: JSON.stringify(data),
     });
     setToken(res.token);
+    if (res.user) {
+      cacheService.set('current_user', res.user);
+    }
+    return res;
+  },
+
+  async guestLogin(): Promise<{ token: string; user: User }> {
+    const res = await apiRequest<{ token: string; user: User }>('/api/auth/guest', {
+      method: 'POST',
+    });
+    setToken(res.token);
+    if (res.user) {
+      cacheService.set('current_user', res.user);
+    }
     return res;
   },
 
@@ -193,6 +221,10 @@ export const api = {
     text?: string;
     mediaUrl?: string;
     mediaType?: 'image' | 'file' | 'audio' | 'video_circle' | 'sticker' | 'document';
+    duration?: number;
+    waveform?: number[];
+    isEncrypted?: boolean;
+    authorName?: string;
     amount?: number;
     tx?: boolean;
     replyTo?: any;
@@ -215,6 +247,12 @@ export const api = {
         timestamp: Date.now(),
         mediaUrl: payload.mediaUrl,
         mediaType: payload.mediaType,
+        duration: payload.duration,
+        waveform: payload.waveform,
+        fileName: payload.fileName,
+        fileSize: payload.fileSize,
+        isEncrypted: payload.isEncrypted,
+        replyTo: payload.replyTo,
         pending: true,
         amount: payload.amount,
         tx: payload.tx,
@@ -246,6 +284,12 @@ export const api = {
         timestamp: Date.now(),
         mediaUrl: payload.mediaUrl,
         mediaType: payload.mediaType,
+        duration: payload.duration,
+        waveform: payload.waveform,
+        fileName: payload.fileName,
+        fileSize: payload.fileSize,
+        isEncrypted: payload.isEncrypted,
+        replyTo: payload.replyTo,
         pending: true,
         amount: payload.amount,
         tx: payload.tx,
@@ -260,6 +304,19 @@ export const api = {
     return apiRequest<{ success: boolean }>(`/api/messages/${contactId}/read`, {
       method: 'POST',
     });
+  },
+
+  async markAsRead(messageId: string): Promise<{ success: boolean }> {
+    if (!navigator.onLine) {
+      return { success: true };
+    }
+    try {
+      return await apiRequest<{ success: boolean }>(`/api/messages/read/${messageId}`, {
+        method: 'POST',
+      });
+    } catch {
+      return { success: false };
+    }
   },
 
   async toggleMessageReaction(contactId: string, messageId: string, emoji: string): Promise<{ success: boolean; reactions: Record<string, MessageReactionInfo> }> {
@@ -315,12 +372,26 @@ export const api = {
       const res = await apiRequest<NewsItem[]>('/api/news');
       if (Array.isArray(res)) {
         cacheService.setCachedNews(res);
+        if (typeof window !== 'undefined') {
+          try {
+            localStorage.setItem('orbit_news_cache', JSON.stringify(res));
+          } catch {}
+        }
       }
       return res;
     } catch (e) {
       const cached = cacheService.getCachedNews();
-      if (cached) return cached;
-      throw e;
+      if (cached && Array.isArray(cached) && cached.length > 0) return cached;
+      if (typeof window !== 'undefined') {
+        const local = localStorage.getItem('orbit_news_cache');
+        if (local) {
+          try {
+            const parsed = JSON.parse(local);
+            if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+          } catch {}
+        }
+      }
+      return [];
     }
   },
 
@@ -408,7 +479,8 @@ export const api = {
     caption?: string,
     options?: {
       slides?: string[];
-      audience?: 'everyone' | 'close_friends' | 'contacts';
+      audience?: 'everyone' | 'close_friends' | 'contacts' | 'groups';
+      targetGroups?: string[];
       hideComments?: boolean;
       hideReactions?: boolean;
       allowedReactions?: string[];
@@ -429,6 +501,7 @@ export const api = {
         reactions: [],
         comments: [],
         audience: options?.audience || 'everyone',
+        targetGroups: options?.targetGroups || [],
       };
       const cached = cacheService.getCachedStories() || [];
       cacheService.setCachedStories([optimisticStory, ...cached]);
@@ -436,18 +509,23 @@ export const api = {
     }
 
     try {
-      return await apiRequest<Story>('/api/stories', {
+      const created = await apiRequest<Story>('/api/stories', {
         method: 'POST',
         body: JSON.stringify({
           mediaUrl,
           caption,
           slides: options?.slides,
           audience: options?.audience,
+          targetGroups: options?.targetGroups,
           hideComments: options?.hideComments,
           hideReactions: options?.hideReactions,
           allowedReactions: options?.allowedReactions,
         }),
       });
+      const cached = cacheService.getCachedStories() || [];
+      const updatedList = [created, ...cached.filter((s) => s.id !== created.id)];
+      cacheService.setCachedStories(updatedList);
+      return created;
     } catch (err: any) {
       offlineOutbox.enqueue('story', caption || 'История', { imageUrl: mediaUrl, caption, options });
       const currentUser = cacheService.getSync<User>('current_user');
@@ -463,6 +541,7 @@ export const api = {
         reactions: [],
         comments: [],
         audience: options?.audience || 'everyone',
+        targetGroups: options?.targetGroups || [],
       };
       const cached = cacheService.getCachedStories() || [];
       cacheService.setCachedStories([optimisticStory, ...cached]);
@@ -480,41 +559,85 @@ export const api = {
       allowedReactions?: string[];
     }
   ): Promise<{ success: boolean; story: Story }> {
-    return apiRequest<{ success: boolean; story: Story }>(`/api/stories/${storyId}`, {
+    const res = await apiRequest<{ success: boolean; story: Story }>(`/api/stories/${storyId}`, {
       method: 'PUT',
       body: JSON.stringify(updates),
     });
+    if (res && res.success && res.story) {
+      const cached = cacheService.getCachedStories() || [];
+      const updatedList = cached.map((s) => (s.id === storyId ? res.story : s));
+      cacheService.setCachedStories(updatedList);
+    }
+    return res;
   },
 
   async deleteStory(storyId: string): Promise<{ success: boolean; message: string }> {
-    return apiRequest<{ success: boolean; message: string }>(`/api/stories/${storyId}`, {
-      method: 'DELETE',
-    });
+    try {
+      const res = await apiRequest<{ success: boolean; message: string }>(`/api/stories/${storyId}`, {
+        method: 'DELETE',
+      });
+      const cached = cacheService.getCachedStories() || [];
+      const updatedList = cached.filter((s) => s.id !== storyId);
+      cacheService.setCachedStories(updatedList);
+      return res;
+    } catch (err) {
+      const cached = cacheService.getCachedStories() || [];
+      const updatedList = cached.filter((s) => s.id !== storyId);
+      cacheService.setCachedStories(updatedList);
+      return { success: true, message: 'История удалена' };
+    }
   },
 
   async reactToStory(storyId: string, emoji: string): Promise<{ success: boolean; reaction: StoryReaction }> {
-    return apiRequest<{ success: boolean; reaction: StoryReaction }>(`/api/stories/${storyId}/react`, {
+    const res = await apiRequest<{ success: boolean; reaction: StoryReaction }>(`/api/stories/${storyId}/react`, {
       method: 'POST',
       body: JSON.stringify({ emoji }),
     });
+    if (res && res.success && res.reaction) {
+      const cached = cacheService.getCachedStories() || [];
+      const updatedList = cached.map((s) => {
+        if (s.id === storyId) {
+          const reactions = [...(s.reactions || []), res.reaction];
+          return { ...s, reactions };
+        }
+        return s;
+      });
+      cacheService.setCachedStories(updatedList);
+    }
+    return res;
   },
 
   async commentOnStory(storyId: string, text: string): Promise<{ success: boolean; comment: StoryComment }> {
-    return apiRequest<{ success: boolean; comment: StoryComment }>(`/api/stories/${storyId}/comment`, {
+    const res = await apiRequest<{ success: boolean; comment: StoryComment }>(`/api/stories/${storyId}/comment`, {
       method: 'POST',
       body: JSON.stringify({ text }),
     });
+    if (res && res.success && res.comment) {
+      const cached = cacheService.getCachedStories() || [];
+      const updatedList = cached.map((s) => {
+        if (s.id === storyId) {
+          const comments = [...(s.comments || []), res.comment];
+          return { ...s, comments };
+        }
+        return s;
+      });
+      cacheService.setCachedStories(updatedList);
+    }
+    return res;
   },
 
   async markStoryViewed(storyId: string): Promise<void> {
     await apiRequest(`/api/stories/${storyId}/view`, { method: 'POST' });
+    const cached = cacheService.getCachedStories() || [];
+    const updatedList = cached.map((s) => (s.id === storyId ? { ...s, viewed: true } : s));
+    cacheService.setCachedStories(updatedList);
   },
 
   // News Operations
   async createNews(
     title: string,
     content: string,
-    options?: { mediaUrl?: string; mediaType?: 'image' | 'video'; tag?: string; accent?: string; summary?: string; category?: string; videoUrl?: string; isReel?: boolean }
+    options?: { mediaUrl?: string; mediaType?: 'image' | 'video'; tag?: string; accent?: string; summary?: string; category?: string; videoUrl?: string; isReel?: boolean; audience?: 'everyone' | 'groups'; targetGroups?: string[] }
   ): Promise<NewsItem> {
     if (!navigator.onLine) {
       offlineOutbox.enqueue(options?.isReel ? 'reel' : 'news_post', title, { title, content, ...options });
@@ -534,6 +657,8 @@ export const api = {
         userLiked: false,
         commentsCount: 0,
         comments: [],
+        audience: options?.audience || 'everyone',
+        targetGroups: options?.targetGroups || [],
       };
       const cached = cacheService.getCachedNews() || [];
       cacheService.setCachedNews([optimisticNews, ...cached]);
@@ -541,10 +666,14 @@ export const api = {
     }
 
     try {
-      return await apiRequest<NewsItem>('/api/news', {
+      const created = await apiRequest<NewsItem>('/api/news', {
         method: 'POST',
         body: JSON.stringify({ title, content, ...options }),
       });
+      const cached = cacheService.getCachedNews() || [];
+      const updatedList = [created, ...cached.filter((n) => n.id !== created.id)];
+      cacheService.setCachedNews(updatedList);
+      return created;
     } catch (err: any) {
       offlineOutbox.enqueue(options?.isReel ? 'reel' : 'news_post', title, { title, content, ...options });
       const currentUser = cacheService.getSync<User>('current_user');
@@ -563,11 +692,38 @@ export const api = {
         userLiked: false,
         commentsCount: 0,
         comments: [],
+        audience: options?.audience || 'everyone',
+        targetGroups: options?.targetGroups || [],
       };
       const cached = cacheService.getCachedNews() || [];
       cacheService.setCachedNews([optimisticNews, ...cached]);
       return optimisticNews;
     }
+  },
+
+  // Follower Groups
+  async getFollowerGroups(): Promise<FollowerGroup[]> {
+    return apiRequest<FollowerGroup[]>('/api/follower-groups');
+  },
+
+  async createFollowerGroup(name: string, memberIds: string[] = []): Promise<{ success: boolean; group: FollowerGroup }> {
+    return apiRequest<{ success: boolean; group: FollowerGroup }>('/api/follower-groups', {
+      method: 'POST',
+      body: JSON.stringify({ name, memberIds }),
+    });
+  },
+
+  async updateFollowerGroup(id: string, updates: { name?: string; memberIds?: string[] }): Promise<{ success: boolean; group: FollowerGroup }> {
+    return apiRequest<{ success: boolean; group: FollowerGroup }>(`/api/follower-groups/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(updates),
+    });
+  },
+
+  async deleteFollowerGroup(id: string): Promise<{ success: boolean }> {
+    return apiRequest<{ success: boolean }>(`/api/follower-groups/${id}`, {
+      method: 'DELETE',
+    });
   },
 
   async createNewsItem(payload: any): Promise<NewsItem> {
@@ -576,31 +732,82 @@ export const api = {
 
   async updateNews(
     id: string,
-    updates: { title?: string; content?: string; mediaUrl?: string; tag?: string; mediaType?: 'image' | 'video' }
+    updates: {
+      title?: string;
+      content?: string;
+      mediaUrl?: string;
+      tag?: string;
+      mediaType?: 'image' | 'video';
+      audience?: 'everyone' | 'groups';
+      targetGroups?: string[];
+    }
   ): Promise<{ success: boolean; news: NewsItem }> {
-    return apiRequest<{ success: boolean; news: NewsItem }>(`/api/news/${id}`, {
+    const res = await apiRequest<{ success: boolean; news: NewsItem }>(`/api/news/${id}`, {
       method: 'PUT',
       body: JSON.stringify(updates),
     });
+    if (res && res.success && res.news) {
+      const cached = cacheService.getCachedNews() || [];
+      const updatedList = cached.map((n) => (n.id === id ? res.news : n));
+      cacheService.setCachedNews(updatedList);
+    }
+    return res;
   },
 
   async deleteNews(id: string): Promise<{ success: boolean; message: string }> {
-    return apiRequest<{ success: boolean; message: string }>(`/api/news/${id}`, {
-      method: 'DELETE',
-    });
+    if (!navigator.onLine || id.startsWith('news_off_')) {
+      const cached = cacheService.getCachedNews() || [];
+      const updated = cached.filter((n) => n.id !== id);
+      cacheService.setCachedNews(updated);
+      return { success: true, message: 'Новость удалена локально' };
+    }
+    try {
+      const res = await apiRequest<{ success: boolean; message: string }>(`/api/news/${id}`, {
+        method: 'DELETE',
+      });
+      const cached = cacheService.getCachedNews() || [];
+      const updated = cached.filter((n) => n.id !== id);
+      cacheService.setCachedNews(updated);
+      return res;
+    } catch (err: any) {
+      const cached = cacheService.getCachedNews() || [];
+      const updated = cached.filter((n) => n.id !== id);
+      cacheService.setCachedNews(updated);
+      return { success: true, message: 'Новость удалена' };
+    }
   },
 
   async toggleNewsLike(id: string): Promise<{ success: boolean; likesCount: number; userLiked: boolean }> {
-    return apiRequest<{ success: boolean; likesCount: number; userLiked: boolean }>(`/api/news/${id}/like`, {
+    const res = await apiRequest<{ success: boolean; likesCount: number; userLiked: boolean }>(`/api/news/${id}/like`, {
       method: 'POST',
     });
+    if (res && res.success) {
+      const cached = cacheService.getCachedNews() || [];
+      const updated = cached.map((n) =>
+        n.id === id ? { ...n, likesCount: res.likesCount, userLiked: res.userLiked } : n
+      );
+      cacheService.setCachedNews(updated);
+    }
+    return res;
   },
 
   async commentOnNews(id: string, text: string): Promise<{ success: boolean; comment: NewsComment }> {
-    return apiRequest<{ success: boolean; comment: NewsComment }>(`/api/news/${id}/comment`, {
+    const res = await apiRequest<{ success: boolean; comment: NewsComment }>(`/api/news/${id}/comment`, {
       method: 'POST',
       body: JSON.stringify({ text }),
     });
+    if (res && res.success && res.comment) {
+      const cached = cacheService.getCachedNews() || [];
+      const updated = cached.map((n) => {
+        if (n.id === id) {
+          const comments = [...(n.comments || []), res.comment];
+          return { ...n, comments, commentsCount: comments.length };
+        }
+        return n;
+      });
+      cacheService.setCachedNews(updated);
+    }
+    return res;
   },
 
   async reportNews(id: string, reason?: string, comment?: string): Promise<{ success: boolean; message: string }> {
@@ -612,7 +819,17 @@ export const api = {
 
   // Channels & Groups Operations
   async getChannelsGroups(): Promise<ChannelGroup[]> {
-    return apiRequest<ChannelGroup[]>('/api/channels-groups');
+    try {
+      const res = await apiRequest<ChannelGroup[]>('/api/channels-groups');
+      if (Array.isArray(res)) {
+        cacheService.set('channels_groups', res);
+      }
+      return res;
+    } catch (e) {
+      const cached = cacheService.getSync<ChannelGroup[]>('channels_groups');
+      if (cached) return cached;
+      throw e;
+    }
   },
 
   async searchChannelsGroups(query: string): Promise<ChannelGroup[]> {
@@ -627,16 +844,35 @@ export const api = {
     avatarUrl?: string;
     avatarColor?: string;
   }): Promise<ChannelGroup> {
-    return apiRequest<ChannelGroup>('/api/channels-groups', {
+    const created = await apiRequest<ChannelGroup>('/api/channels-groups', {
       method: 'POST',
       body: JSON.stringify(data),
     });
+    if (created && created.id) {
+      const cached = cacheService.getSync<ChannelGroup[]>('channels_groups') || [];
+      const updated = [created, ...cached.filter((item) => item.id !== created.id)];
+      cacheService.set('channels_groups', updated);
+    }
+    return created;
   },
 
   async joinChannelGroup(id: string): Promise<{ success: boolean; channelGroup: ChannelGroup }> {
     return apiRequest<{ success: boolean; channelGroup: ChannelGroup }>(`/api/channels-groups/${id}/join`, {
       method: 'POST',
     });
+  },
+
+  async inviteChannelMember(
+    id: string,
+    params: { targetUserId?: string; search?: string }
+  ): Promise<{ success: boolean; message: string; channelGroup: ChannelGroup }> {
+    return apiRequest<{ success: boolean; message: string; channelGroup: ChannelGroup }>(
+      `/api/channels-groups/${id}/invite`,
+      {
+        method: 'POST',
+        body: JSON.stringify(params),
+      }
+    );
   },
 
   async leaveChannelGroup(id: string): Promise<{ success: boolean }> {

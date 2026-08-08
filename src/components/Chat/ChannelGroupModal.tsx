@@ -21,10 +21,16 @@ import {
   Share2,
   BarChart2,
   TrendingUp,
+  Plus,
+  Loader2,
+  Search,
+  ArrowUpDown,
+  Filter,
 } from 'lucide-react';
 import { ChannelGroup, User } from '../../types';
 import { api } from '../../services/api';
 import { ChannelAnalyticsDashboard } from './ChannelAnalyticsDashboard';
+import { WallpaperModal, WallpaperSettings } from './WallpaperModal';
 
 interface ChannelGroupModalProps {
   channelGroupId: string;
@@ -59,11 +65,56 @@ export const ChannelGroupModal: React.FC<ChannelGroupModalProps> = ({
   const [editDisableComments, setEditDisableComments] = useState(false);
   const [editDisableForwarding, setEditDisableForwarding] = useState(false);
 
+  // Background Customization State
+  const [editBgPattern, setEditBgPattern] = useState('default');
+  const [editBgOpacity, setEditBgOpacity] = useState(35);
+  const [editBgAdaptTheme, setEditBgAdaptTheme] = useState(true);
+  const [editBgImageUrl, setEditBgImageUrl] = useState('');
+  const [showWallpaperModal, setShowWallpaperModal] = useState(false);
+
   const AVAILABLE_EMOJIS = ['❤️', '👍', '🔥', '😂', '😮', '😢', '🙏', '🎉', '💯', '💩', '😍', '👏'];
 
   const [copied, setCopied] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
+
+  // Invite member modal state
+  const [showAddMemberModal, setShowAddMemberModal] = useState(false);
+  const [memberSearchQuery, setMemberSearchQuery] = useState('');
+  const [memberListSearchQuery, setMemberListSearchQuery] = useState('');
+  const [memberListSortMode, setMemberListSortMode] = useState<'role' | 'alphabet' | 'recent'>('role');
+  const [isInvitingMember, setIsInvitingMember] = useState(false);
+  const [followersList, setFollowersList] = useState<any[]>([]);
+
+  useEffect(() => {
+    if (showAddMemberModal) {
+      api.getContacts().then((contacts) => {
+        setFollowersList(contacts || []);
+      }).catch(() => {});
+    }
+  }, [showAddMemberModal]);
+
+  const handleInviteUser = async (targetUser?: any) => {
+    if (!cg) return;
+    setIsInvitingMember(true);
+    try {
+      const res = await api.inviteChannelMember(cg.id, {
+        targetUserId: targetUser?.id,
+        search: !targetUser ? memberSearchQuery : undefined,
+      });
+      if (res.success && res.channelGroup) {
+        setCg(res.channelGroup);
+        if (onUpdated) onUpdated(res.channelGroup);
+        showToast(res.message || 'Участник успешно добавлен!');
+        setShowAddMemberModal(false);
+        setMemberSearchQuery('');
+      }
+    } catch (err: any) {
+      showToast(err.message || 'Ошибка добавления участника');
+    } finally {
+      setIsInvitingMember(false);
+    }
+  };
 
   const showToast = (msg: string) => {
     setToastMsg(msg);
@@ -84,6 +135,10 @@ export const ChannelGroupModal: React.FC<ChannelGroupModalProps> = ({
       setEditAllowedReactions(data.allowedReactions && data.allowedReactions.length > 0 ? data.allowedReactions : ['❤️', '👍', '🔥', '😂', '😮']);
       setEditDisableComments(!!data.disableComments);
       setEditDisableForwarding(!!data.disableForwarding);
+      setEditBgPattern(data.bgPattern || 'default');
+      setEditBgOpacity(data.bgOpacity ?? 35);
+      setEditBgAdaptTheme(data.bgAdaptTheme ?? true);
+      setEditBgImageUrl(data.bgImageUrl || '');
     } catch (err: any) {
       console.error('Error loading channel details:', err);
       showToast('Не удалось загрузить данные канала');
@@ -138,6 +193,10 @@ export const ChannelGroupModal: React.FC<ChannelGroupModalProps> = ({
         allowedReactions: editAllowedReactions,
         disableComments: editDisableComments,
         disableForwarding: editDisableForwarding,
+        bgPattern: editBgPattern,
+        bgOpacity: editBgOpacity,
+        bgAdaptTheme: editBgAdaptTheme,
+        bgImageUrl: editBgImageUrl,
       });
       if (res.success) {
         showToast('Настройки канала сохранены');
@@ -147,6 +206,29 @@ export const ChannelGroupModal: React.FC<ChannelGroupModalProps> = ({
       }
     } catch (err: any) {
       showToast(err.message || 'Ошибка при сохранении настроек');
+    }
+  };
+
+  const handleSaveWallpaperFromModal = async (newSettings: WallpaperSettings) => {
+    setEditBgPattern(newSettings.preset);
+    setEditBgOpacity(newSettings.opacity);
+    setEditBgAdaptTheme(newSettings.adaptTheme);
+    setEditBgImageUrl(newSettings.imageUrl || '');
+
+    try {
+      const res = await api.updateChannelGroup(cg.id, {
+        bgPattern: newSettings.preset,
+        bgOpacity: newSettings.opacity,
+        bgAdaptTheme: newSettings.adaptTheme,
+        bgImageUrl: newSettings.imageUrl || '',
+      });
+      if (res.success) {
+        showToast('Задний фон канала/группы сохранен для всех!');
+        loadDetails();
+        onUpdated?.(res.channelGroup);
+      }
+    } catch (err: any) {
+      showToast(err.message || 'Ошибка сохранения фона');
     }
   };
 
@@ -234,7 +316,7 @@ export const ChannelGroupModal: React.FC<ChannelGroupModalProps> = ({
       <div className={`relative w-full ${activeTab === 'analytics' ? 'max-w-3xl' : 'max-w-lg'} bg-white/95 dark:bg-slate-900/95 backdrop-blur-2xl border border-white/60 dark:border-slate-800 rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh] transition-all duration-300`}>
         {/* Toast alert */}
         {toastMsg && (
-          <div className="absolute top-3 left-1/2 -translate-x-1/2 z-[100] bg-slate-900 text-white text-xs px-4 py-2 rounded-full shadow-xl animate-fade-in">
+          <div className="absolute top-3 left-1/2 -translate-x-1/2 z-[100] bg-white/80 dark:bg-slate-900/80 backdrop-blur-md border border-slate-200/50 dark:border-slate-800/50 text-slate-600 dark:text-slate-300 text-xs font-medium px-4 py-2 rounded-2xl shadow-xl animate-fade-in whitespace-nowrap">
             {toastMsg}
           </div>
         )}
@@ -418,17 +500,79 @@ export const ChannelGroupModal: React.FC<ChannelGroupModalProps> = ({
 
           {activeTab === 'members' && (
             <div className="space-y-3 animate-fade-in">
-              <div className="text-xs text-slate-400 font-medium px-1">
-                Список участников канала ({cg.members?.length || 0})
+              <div className="flex items-center justify-between px-1">
+                <div className="text-xs text-slate-400 font-medium">
+                  Участники / Подписчики ({cg.members?.length || 0})
+                </div>
+                {canManage && (
+                  <button
+                    onClick={() => setShowAddMemberModal(true)}
+                    className="h-7 w-7 rounded-full bg-sky-500 hover:bg-sky-600 text-white flex items-center justify-center shadow-md active:scale-95 transition shrink-0"
+                    title="Добавить участника"
+                  >
+                    <Plus size={16} />
+                  </button>
+                )}
               </div>
 
-              <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
-                {(cg.members || []).map((m: any) => {
-                  const isMemCreator = m.id === cg.creatorId;
-                  const isMemAdmin = m.roleInGroup === 'admin';
-                  const isMemMod = m.roleInGroup === 'moderator';
+              {/* Search & Sorting bar for channel members/subscribers */}
+              <div className="flex items-center gap-2">
+                <div className="relative flex-1">
+                  <Search size={14} className="absolute left-3 top-2.5 text-slate-400" />
+                  <input
+                    type="text"
+                    value={memberListSearchQuery}
+                    onChange={(e) => setMemberListSearchQuery(e.target.value)}
+                    placeholder="Поиск участников..."
+                    className="w-full pl-8 pr-3 py-1.5 rounded-xl text-xs bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 outline-none focus:ring-1 focus:ring-sky-500"
+                  />
+                </div>
 
-                  return (
+                <div className="relative shrink-0 flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs">
+                  <ArrowUpDown size={13} className="text-sky-500" />
+                  <select
+                    value={memberListSortMode}
+                    onChange={(e) => setMemberListSortMode(e.target.value as any)}
+                    className="bg-transparent text-[11px] font-semibold text-slate-700 dark:text-slate-200 outline-none cursor-pointer"
+                  >
+                    <option value="role">По ролям</option>
+                    <option value="alphabet">По имени (А–Я)</option>
+                    <option value="recent">По дате</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="space-y-2 max-h-72 overflow-y-auto pr-1 no-scrollbar">
+                {(cg.members || [])
+                  .filter((m: any) => {
+                    if (!memberListSearchQuery.trim()) return true;
+                    const q = memberListSearchQuery.toLowerCase();
+                    return (
+                      (m.username && m.username.toLowerCase().includes(q)) ||
+                      (m.handle && m.handle.toLowerCase().includes(q))
+                    );
+                  })
+                  .sort((a: any, b: any) => {
+                    if (memberListSortMode === 'alphabet') {
+                      return (a.username || '').localeCompare(b.username || '', 'ru');
+                    }
+                    if (memberListSortMode === 'role') {
+                      const getRoleWeight = (mem: any) => {
+                        if (mem.id === cg.creatorId) return 4;
+                        if (mem.roleInGroup === 'admin') return 3;
+                        if (mem.roleInGroup === 'moderator') return 2;
+                        return 1;
+                      };
+                      return getRoleWeight(b) - getRoleWeight(a);
+                    }
+                    return 0;
+                  })
+                  .map((m: any) => {
+                    const isMemCreator = m.id === cg.creatorId;
+                    const isMemAdmin = m.roleInGroup === 'admin';
+                    const isMemMod = m.roleInGroup === 'moderator';
+
+                    return (
                     <div
                       key={m.id}
                       className="p-2.5 rounded-2xl bg-slate-100/70 dark:bg-slate-800/60 border border-slate-200/50 dark:border-slate-700/50 flex items-center justify-between gap-3"
@@ -509,6 +653,25 @@ export const ChannelGroupModal: React.FC<ChannelGroupModalProps> = ({
           {activeTab === 'settings' && canManage && (
             <div className="space-y-4 animate-fade-in">
               <div className="space-y-3">
+                {/* Background Wallpaper Settings Block for Channel/Group */}
+                <div className="p-3.5 rounded-2xl bg-gradient-to-r from-sky-500/10 to-indigo-500/10 border border-sky-500/20 flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-xs font-bold text-slate-800 dark:text-slate-100">
+                      Задний фон {isChannel ? 'канала' : 'группы'}
+                    </div>
+                    <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                      Заданный фон будет одинаково виден всем участникам
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowWallpaperModal(true)}
+                    className="px-3.5 py-2 rounded-xl bg-sky-500 hover:bg-sky-600 text-white font-bold text-xs shadow-md shadow-sky-500/20 transition shrink-0"
+                  >
+                    Изменить фон
+                  </button>
+                </div>
+
                 <div>
                   <label className="text-xs font-semibold text-slate-400 block mb-1">Название {isChannel ? 'канала' : 'группы'}</label>
                   <input
@@ -671,6 +834,109 @@ export const ChannelGroupModal: React.FC<ChannelGroupModalProps> = ({
           )}
         </div>
       </div>
+
+      {showAddMemberModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-md animate-fade-in">
+          <div className="w-full max-w-sm rounded-3xl p-5 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-slate-800 dark:text-slate-100 font-bold text-sm">
+                <UserPlus size={18} className="text-sky-500" />
+                <span>Добавить участника</span>
+              </div>
+              <button
+                onClick={() => setShowAddMemberModal(false)}
+                className="p-1.5 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-400"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className="text-[11px] font-semibold text-slate-400 block mb-1">
+                  Поиск по номеру телефона или никнейму (@username)
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={memberSearchQuery}
+                    onChange={(e) => setMemberSearchQuery(e.target.value)}
+                    placeholder="Например: @alex, +7900..."
+                    className="flex-1 px-3.5 py-2 rounded-2xl bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-xs font-medium focus:outline-none focus:ring-2 focus:ring-sky-500"
+                  />
+                  <button
+                    disabled={!memberSearchQuery.trim() || isInvitingMember}
+                    onClick={() => handleInviteUser()}
+                    className="px-3 py-2 rounded-2xl bg-sky-500 hover:bg-sky-600 disabled:opacity-50 text-white text-xs font-semibold shadow-md shrink-0 transition"
+                  >
+                    {isInvitingMember ? <Loader2 size={14} className="animate-spin" /> : 'Найти'}
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <span className="text-[11px] font-semibold text-slate-400 block mb-1.5">
+                  Или выберите из списка контактов:
+                </span>
+                <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
+                  {followersList.length === 0 ? (
+                    <div className="text-xs text-slate-400 text-center py-4">Список контактов пуст</div>
+                  ) : (
+                    followersList.map((contact: any) => {
+                      const isAlreadyMember = (cg?.memberIds || []).includes(contact.id);
+                      return (
+                        <div
+                          key={contact.id}
+                          className="p-2 rounded-2xl bg-slate-100/70 dark:bg-slate-800/60 flex items-center justify-between gap-2"
+                        >
+                          <div className="flex items-center gap-2 min-w-0">
+                            <div className="h-8 w-8 rounded-xl bg-sky-500 text-white text-xs font-bold flex items-center justify-center shrink-0">
+                              {(contact.name || contact.username || 'U')[0]}
+                            </div>
+                            <div className="min-w-0">
+                              <div className="text-xs font-semibold text-slate-800 dark:text-slate-100 truncate">
+                                {contact.name || contact.username}
+                              </div>
+                              <div className="text-[10px] text-slate-400 truncate">
+                                {contact.handle || contact.phoneNumber || ''}
+                              </div>
+                            </div>
+                          </div>
+                          <button
+                            disabled={isAlreadyMember || isInvitingMember}
+                            onClick={() => handleInviteUser(contact)}
+                            className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition ${
+                              isAlreadyMember
+                                ? 'bg-slate-200 dark:bg-slate-700 text-slate-400'
+                                : 'bg-sky-500 hover:bg-sky-600 text-white shadow-sm'
+                            }`}
+                          >
+                            {isAlreadyMember ? 'В группе' : 'Добавить'}
+                          </button>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Wallpaper Background Customizer Modal */}
+      <WallpaperModal
+        isOpen={showWallpaperModal}
+        onClose={() => setShowWallpaperModal(false)}
+        settings={{
+          preset: editBgPattern,
+          opacity: editBgOpacity,
+          adaptTheme: editBgAdaptTheme,
+          imageUrl: editBgImageUrl,
+        }}
+        onSave={handleSaveWallpaperFromModal}
+        title={isChannel ? 'Оформить фон канала' : 'Оформить фон группы'}
+        subtitle="Заданный фон сохранится на сервере и будет отображаться всем участникам"
+      />
     </div>
   );
 };

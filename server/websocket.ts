@@ -1,6 +1,7 @@
 import { Server as HttpServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import jwt from 'jsonwebtoken';
+import { securityManager } from './security.js';
 
 const JWT_SECRET = process.env.JWT_SECRET || 'orbit_jwt_secret_super_key_2026_prod';
 
@@ -18,12 +19,20 @@ class RealtimeServer {
 
     this.wss.on('connection', (ws: ClientSocket, req) => {
       ws.isAlive = true;
+      const clientIp = req.socket.remoteAddress || 'unknown_ws';
 
       ws.on('pong', () => {
         ws.isAlive = true;
       });
 
       ws.on('message', (message: string) => {
+        const rateKey = ws.userId || clientIp;
+        if (!securityManager.checkWebSocketRate(rateKey)) {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'error', message: 'Превышена частота отправки команд по WebSocket (Anti-Spam).' }));
+          }
+          return;
+        }
         try {
           const data = JSON.parse(message.toString());
           if (data.type === 'auth') {
@@ -64,17 +73,91 @@ class RealtimeServer {
               });
             }
           } else if (data.type === 'accept_call') {
-            this.broadcast({
-              type: 'call_accepted',
-              callerId: data.callerId,
-              responderId: ws.userId,
-            });
+            if (data.callerId) {
+              this.sendToUser(data.callerId, {
+                type: 'call_accepted',
+                callerId: data.callerId,
+                responderId: ws.userId || data.responderId,
+              });
+            } else {
+              this.broadcast({
+                type: 'call_accepted',
+                callerId: data.callerId,
+                responderId: ws.userId || data.responderId,
+              });
+            }
           } else if (data.type === 'decline_call') {
-            this.broadcast({
-              type: 'call_declined',
-              callerId: data.callerId,
-              responderId: ws.userId,
-            });
+            if (data.callerId) {
+              this.sendToUser(data.callerId, {
+                type: 'call_declined',
+                callerId: data.callerId,
+                responderId: ws.userId || data.responderId,
+              });
+            } else {
+              this.broadcast({
+                type: 'call_declined',
+                callerId: data.callerId,
+                responderId: ws.userId || data.responderId,
+              });
+            }
+          } else if (data.type === 'end_call') {
+            const { targetUserId } = data;
+            if (targetUserId) {
+              this.sendToUser(targetUserId, {
+                type: 'call_ended',
+                fromUserId: ws.userId,
+              });
+            } else {
+              this.broadcast({
+                type: 'call_ended',
+                fromUserId: ws.userId,
+              });
+            }
+          } else if (data.type === 'webrtc_offer') {
+            const { targetUserId, offer, callerId } = data;
+            if (targetUserId) {
+              this.sendToUser(targetUserId, {
+                type: 'webrtc_offer',
+                offer,
+                callerId: callerId || ws.userId,
+              });
+            } else {
+              this.broadcast({
+                type: 'webrtc_offer',
+                offer,
+                callerId: callerId || ws.userId,
+              });
+            }
+          } else if (data.type === 'webrtc_answer') {
+            const { targetUserId, answer, responderId } = data;
+            if (targetUserId) {
+              this.sendToUser(targetUserId, {
+                type: 'webrtc_answer',
+                answer,
+                responderId: responderId || ws.userId,
+              });
+            } else {
+              this.broadcast({
+                type: 'webrtc_answer',
+                answer,
+                responderId: responderId || ws.userId,
+              });
+            }
+          } else if (data.type === 'webrtc_ice_candidate') {
+            const { targetUserId, candidate, senderId } = data;
+            if (targetUserId) {
+              this.sendToUser(targetUserId, {
+                type: 'webrtc_ice_candidate',
+                candidate,
+                senderId: senderId || ws.userId,
+              });
+            } else {
+              this.broadcast({
+                type: 'webrtc_ice_candidate',
+                candidate,
+                senderId: senderId || ws.userId,
+              });
+            }
           } else if (data.type === 'start_live_stream') {
             this.broadcast({
               type: 'live_stream_started',
@@ -82,6 +165,24 @@ class RealtimeServer {
               channelTitle: data.channelTitle,
               authorName: data.authorName,
             });
+          } else if (data.type === 'typing') {
+            const { targetUserId, channelGroupId, isTyping } = data;
+            const senderId = ws.userId;
+            if (targetUserId) {
+              this.sendToUser(targetUserId, {
+                type: 'user_typing',
+                senderId,
+                channelGroupId,
+                isTyping: !!isTyping,
+              });
+            } else if (channelGroupId) {
+              this.broadcast({
+                type: 'user_typing',
+                senderId,
+                channelGroupId,
+                isTyping: !!isTyping,
+              });
+            }
           }
         } catch (e) {
           console.error('WebSocket message parsing error:', e);

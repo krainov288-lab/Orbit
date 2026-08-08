@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { NewsItem, Story, User, NewsComment } from '../../types';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { NewsItem, Story, User, NewsComment, FollowerGroup, Contact } from '../../types';
 import {
   Plus,
   Send,
@@ -20,12 +20,39 @@ import {
   Loader2,
   Maximize2,
   ExternalLink,
+  Users,
+  UserCheck,
+  Sliders,
+  ShieldCheck,
+  Sparkles,
+  Eye,
+  EyeOff,
+  Search,
+  ChevronUp,
+  ChevronDown,
+  History,
+  Bookmark,
 } from 'lucide-react';
 import { api } from '../../services/api';
+import { compressImage } from '../../services/media';
 import { socketService } from '../../services/socket';
+import { cacheService } from '../../services/cacheService';
 import { StoryViewer } from './StoryViewer';
 import { StoryCreatorModal } from './StoryCreatorModal';
+import { FollowerGroupsModal } from './FollowerGroupsModal';
 import { checkVideoDuration, processMediaFileForStory } from '../../utils/media';
+import { groupStoriesByUser, UserStoryGroup } from '../../utils/storyGroups';
+import {
+  FeedSettings,
+  getStoredFeedSettings,
+  filterAndRankNews,
+  isOfficialNews,
+  addSearchQueryToHistory,
+} from '../../utils/feedAlgorithm';
+import {
+  getSavedNewsItems,
+  toggleSaveNewsItem,
+} from '../../utils/savedNewsService';
 
 interface FeedScreenProps {
   news: NewsItem[];
@@ -34,6 +61,7 @@ interface FeedScreenProps {
   isGuest?: boolean;
   onOpenAuth?: () => void;
   onAddNews?: (item: NewsItem) => void;
+  onDeleteNews?: (id: string) => void;
   onRecordVideoCircle?: () => void;
 }
 
@@ -43,6 +71,7 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
   isGuest,
   onOpenAuth,
   onAddNews,
+  onDeleteNews,
 }) => {
   // Local News State with cache fallback
   const [newsList, setNewsList] = useState<NewsItem[]>(() => {
@@ -61,6 +90,99 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
   const lastTapMap = useRef<{ [key: string]: number }>({});
   const tapTimeoutMap = useRef<{ [key: string]: any }>({});
 
+  // Feed Settings State synced live
+  const [feedSettings, setFeedSettings] = useState<FeedSettings>(() => getStoredFeedSettings(currentUser?.id));
+
+  // Saved news IDs state
+  const [savedNewsIds, setSavedNewsIds] = useState<string[]>(() =>
+    getSavedNewsItems().map((item) => item.id)
+  );
+
+  useEffect(() => {
+    const handleSavedNewsUpdated = () => {
+      setSavedNewsIds(getSavedNewsItems().map((item) => item.id));
+    };
+    window.addEventListener('orbit_saved_news_updated', handleSavedNewsUpdated);
+    return () => {
+      window.removeEventListener('orbit_saved_news_updated', handleSavedNewsUpdated);
+    };
+  }, []);
+
+  // News Search Bubble & Pull-to-search state
+  const [isSearchVisible, setIsSearchVisible] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [pullDistance, setPullDistance] = useState(0);
+  const touchStartYRef = useRef<number | null>(null);
+  const isPullingRef = useRef(false);
+
+  useEffect(() => {
+    const updateFeedSettings = () => {
+      setFeedSettings(getStoredFeedSettings(currentUser?.id));
+    };
+    window.addEventListener('storage', updateFeedSettings);
+    window.addEventListener('orbit_feed_settings_changed', updateFeedSettings);
+    updateFeedSettings();
+    return () => {
+      window.removeEventListener('storage', updateFeedSettings);
+      window.removeEventListener('orbit_feed_settings_changed', updateFeedSettings);
+    };
+  }, [currentUser?.id]);
+
+  const displayedNewsList = useMemo(() => {
+    let list: NewsItem[] = [];
+    if (isGuest) {
+      list = newsList.filter((n) => isOfficialNews(n));
+    } else {
+      list = filterAndRankNews(newsList, feedSettings);
+    }
+
+    if (searchQuery.trim()) {
+      const q = searchQuery.trim().toLowerCase();
+      list = list.filter((item) => {
+        const text = `${item.title || ''} ${item.content || ''} ${item.tag || ''} ${item.authorName || ''}`.toLowerCase();
+        return text.includes(q);
+      });
+    }
+
+    return list;
+  }, [newsList, feedSettings, isGuest, searchQuery]);
+
+  // Pull-down gesture handlers
+  const handleTouchStart = (e: React.TouchEvent) => {
+    const target = e.currentTarget;
+    if (target.scrollTop <= 5) {
+      touchStartYRef.current = e.touches[0].clientY;
+      isPullingRef.current = true;
+    } else {
+      touchStartYRef.current = null;
+      isPullingRef.current = false;
+    }
+  };
+
+  const handleTouchMove = (e: React.TouchEvent) => {
+    if (!isPullingRef.current || touchStartYRef.current === null) return;
+    const currentY = e.touches[0].clientY;
+    const diff = currentY - touchStartYRef.current;
+    if (diff > 0) {
+      const dist = Math.min(diff * 0.45, 90);
+      setPullDistance(dist);
+    } else {
+      setPullDistance(0);
+    }
+  };
+
+  const handleTouchEnd = () => {
+    if (pullDistance > 35) {
+      setIsSearchVisible((prev) => !prev);
+      if (typeof window !== 'undefined' && window.navigator && window.navigator.vibrate) {
+        window.navigator.vibrate(15);
+      }
+    }
+    setPullDistance(0);
+    touchStartYRef.current = null;
+    isPullingRef.current = false;
+  };
+
   // In-app Notification / Toast & Action Modals State
   const [commentInput, setCommentInput] = useState('');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -76,6 +198,7 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [editingNews, setEditingNews] = useState<NewsItem | null>(null);
   const [isPublishing, setIsPublishing] = useState(false);
+  const [isUploadingNewsMedia, setIsUploadingNewsMedia] = useState(false);
 
   // Form State
   const [title, setTitle] = useState('');
@@ -83,20 +206,31 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
   const [content, setContent] = useState('');
   const [mediaUrl, setMediaUrl] = useState('');
   const [mediaType, setMediaType] = useState<'image' | 'video'>('image');
+  const [newsAudience, setNewsAudience] = useState<'everyone' | 'groups'>('everyone');
+  const [newsTargetGroups, setNewsTargetGroups] = useState<string[]>([]);
+  const [followerGroups, setFollowerGroups] = useState<FollowerGroup[]>([]);
+  const [isGroupsModalOpen, setIsGroupsModalOpen] = useState(false);
   const newsFileInputRef = useRef<HTMLInputElement>(null);
 
   // Stories State with instant localStorage cache
   const [stories, setStories] = useState<Story[]>(() => {
     try {
       const cached = localStorage.getItem('orbit_stories_cache');
-      return cached ? JSON.parse(cached) : [];
+      if (!cached) return [];
+      const parsed: Story[] = JSON.parse(cached);
+      if (!Array.isArray(parsed)) return [];
+      return Array.from(new Map(parsed.map((s) => [s.id, s])).values());
     } catch {
       return [];
     }
   });
 
   const [activeStory, setActiveStory] = useState<Story | null>(null);
+  const [selectedStoryGroupIndex, setSelectedStoryGroupIndex] = useState<number>(0);
   const [showAddStoryModal, setShowAddStoryModal] = useState(false);
+
+  // Grouped stories by user memo
+  const userStoryGroups = useMemo(() => groupStoriesByUser(stories), [stories]);
   const [storyImageUrl, setStoryImageUrl] = useState('');
   const [storyCaption, setStoryCaption] = useState('');
   const storyFileInputRef = useRef<HTMLInputElement>(null);
@@ -106,15 +240,17 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
 
   // Load News from API
   const loadNews = async () => {
-    setIsNewsLoading(true);
+    if (newsList.length === 0) {
+      setIsNewsLoading(true);
+    }
     try {
       const fetched = await api.getNews();
       if (Array.isArray(fetched)) {
         setNewsList(fetched);
-        localStorage.setItem('orbit_news_cache', JSON.stringify(fetched));
+        cacheService.setCachedNews(fetched);
       }
-    } catch (err) {
-      console.error('Failed to load news:', err);
+    } catch {
+      // Graceful fallback to existing newsList state or cached items
     } finally {
       setIsNewsLoading(false);
     }
@@ -122,12 +258,15 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
 
   // Load Stories from API
   const loadStories = async () => {
-    setIsStoriesLoading(true);
+    if (stories.length === 0) {
+      setIsStoriesLoading(true);
+    }
     try {
       const list = await api.getStories();
       if (Array.isArray(list)) {
-        setStories(list);
-        localStorage.setItem('orbit_stories_cache', JSON.stringify(list));
+        const unique = Array.from(new Map(list.map((s) => [s.id, s])).values());
+        setStories(unique);
+        cacheService.setCachedStories(unique);
       }
     } catch (err) {
       console.error('Failed to load stories:', err);
@@ -135,6 +274,13 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
       setIsStoriesLoading(false);
     }
   };
+
+  // Sync with props from parent
+  useEffect(() => {
+    if (propNews) {
+      setNewsList(propNews);
+    }
+  }, [propNews]);
 
   useEffect(() => {
     loadNews();
@@ -144,7 +290,7 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
         setNewsList((prev) => {
           const exists = prev.some((n) => n.id === data.news.id);
           const next = exists ? prev.map((n) => (n.id === data.news.id ? data.news : n)) : [data.news, ...prev];
-          localStorage.setItem('orbit_news_cache', JSON.stringify(next));
+          cacheService.setCachedNews(next);
           return next;
         });
       }
@@ -154,7 +300,7 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
       if (data.news) {
         setNewsList((prev) => {
           const next = prev.map((n) => (n.id === data.news.id ? data.news : n));
-          localStorage.setItem('orbit_news_cache', JSON.stringify(next));
+          cacheService.setCachedNews(next);
           return next;
         });
         setActiveNewsModal((prev) => (prev?.id === data.news.id ? data.news : prev));
@@ -165,7 +311,7 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
       if (data.newsId) {
         setNewsList((prev) => {
           const next = prev.filter((n) => n.id !== data.newsId);
-          localStorage.setItem('orbit_news_cache', JSON.stringify(next));
+          cacheService.setCachedNews(next);
           return next;
         });
         setActiveNewsModal((prev) => (prev?.id === data.newsId ? null : prev));
@@ -180,7 +326,7 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
           setStories((prev) => {
             const exists = prev.some((s) => s.id === data.story.id);
             const next = exists ? prev.map((s) => (s.id === data.story.id ? data.story : s)) : [data.story, ...prev];
-            localStorage.setItem('orbit_stories_cache', JSON.stringify(next));
+            cacheService.setCachedStories(next);
             return next;
           });
         }
@@ -190,7 +336,7 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
         if (data.story) {
           setStories((prev) => {
             const next = prev.map((s) => (s.id === data.story.id ? { ...s, ...data.story } : s));
-            localStorage.setItem('orbit_stories_cache', JSON.stringify(next));
+            cacheService.setCachedStories(next);
             return next;
           });
         }
@@ -200,7 +346,7 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
         if (data.storyId) {
           setStories((prev) => {
             const next = prev.filter((s) => s.id !== data.storyId);
-            localStorage.setItem('orbit_stories_cache', JSON.stringify(next));
+            cacheService.setCachedStories(next);
             return next;
           });
         }
@@ -243,18 +389,37 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
     }
   };
 
-  const handleLocalNewsMediaSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleLocalNewsMediaSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      const isVid = file.type.startsWith('video/');
-      setMediaType(isVid ? 'video' : 'image');
+    if (!file) return;
+
+    const isVid = file.type.startsWith('video/');
+    setMediaType(isVid ? 'video' : 'image');
+    setIsUploadingNewsMedia(true);
+    showToast(isVid ? 'Загрузка видеофайла...' : 'Сжатие и обработка изображения...');
+
+    try {
+      const fileToUpload = !isVid ? await compressImage(file, 1600, 1600, 0.85) : file;
+      const res = await api.uploadMedia(fileToUpload);
+      if (res?.url) {
+        setMediaUrl(res.url);
+        showToast('Медиафайл сжат и готов');
+      } else {
+        throw new Error('Не удалось получить ссылку');
+      }
+    } catch (err: any) {
+      console.warn('Failed to upload news media to server, converting to local media:', err);
       const reader = new FileReader();
       reader.onload = (event) => {
         if (event.target?.result) {
           setMediaUrl(event.target.result as string);
+          showToast('Медиа прикреплено (локально)');
         }
       };
       reader.readAsDataURL(file);
+    } finally {
+      setIsUploadingNewsMedia(false);
+      if (e.target) e.target.value = '';
     }
   };
 
@@ -308,9 +473,14 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
       alert('Заполните заголовок или текст новости');
       return;
     }
-    if (isPublishing) return;
+    if (newsAudience === 'groups' && newsTargetGroups.length === 0) {
+      showToast('Выберите хотя бы одну группу подписчиков');
+      return;
+    }
+    if (isPublishing || isUploadingNewsMedia) return;
 
     setIsPublishing(true);
+    showToast('Публикация новости...');
     try {
       if (editingNews) {
         const res = await api.updateNews(editingNews.id, {
@@ -319,18 +489,23 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
           mediaUrl: mediaUrl.trim() || undefined,
           tag: tag.trim() || 'Новости',
           mediaType,
+          audience: newsAudience,
+          targetGroups: newsAudience === 'groups' ? newsTargetGroups : [],
         });
         if (res.success && res.news) {
           setNewsList((prev) => prev.map((n) => (n.id === editingNews.id ? res.news : n)));
           if (activeNewsModal && activeNewsModal.id === editingNews.id) {
             setActiveNewsModal(res.news);
           }
+          showToast('Новость успешно обновлена');
         }
       } else {
         const created = await api.createNews(title.trim(), content.trim(), {
           tag: tag.trim() || 'Новости',
           mediaUrl: mediaUrl.trim() || undefined,
           mediaType,
+          audience: newsAudience,
+          targetGroups: newsAudience === 'groups' ? newsTargetGroups : [],
         });
         setNewsList((prev) => {
           const exists = prev.some((n) => n.id === created.id);
@@ -338,6 +513,7 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
           return [created, ...prev];
         });
         if (onAddNews) onAddNews(created);
+        showToast('Новость успешно опубликована');
       }
       setShowCreateModal(false);
       setEditingNews(null);
@@ -345,6 +521,7 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
       setContent('');
       setMediaUrl('');
     } catch (err: any) {
+      showToast(err.message || 'Ошибка сохранения новости');
       alert(err.message || 'Ошибка сохранения новости');
     } finally {
       setIsPublishing(false);
@@ -376,13 +553,17 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
     try {
       await api.deleteNews(targetId);
     } catch (err: any) {
-      console.error('Error deleting news:', err);
+      console.warn('Error deleting news from server, removing locally:', err);
     } finally {
       setNewsList((prev) => {
         const next = prev.filter((n) => n.id !== targetId);
         localStorage.setItem('orbit_news_cache', JSON.stringify(next));
+        cacheService.setCachedNews(next);
         return next;
       });
+      if (onDeleteNews) {
+        onDeleteNews(targetId);
+      }
       if (activeNewsModal?.id === targetId) setActiveNewsModal(null);
       showToast('Новость успешно удалена');
     }
@@ -487,7 +668,25 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
   };
 
   return (
-    <div className="w-full px-4 pb-24 space-y-3 mt-1 select-none">
+    <div
+      className="w-full px-4 pb-24 space-y-3 mt-1 select-none"
+      onTouchStart={handleTouchStart}
+      onTouchMove={handleTouchMove}
+      onTouchEnd={handleTouchEnd}
+    >
+      {/* Pull down indicator for news search */}
+      {pullDistance > 0 && (
+        <div
+          className="flex items-center justify-center text-[11px] font-bold text-sky-500 transition-all overflow-hidden"
+          style={{ height: `${pullDistance}px`, opacity: Math.min(pullDistance / 40, 1) }}
+        >
+          <div className="flex items-center gap-1.5 bg-white/90 dark:bg-slate-900/90 px-3.5 py-1 rounded-full border border-sky-500/30 shadow-xs backdrop-blur-md">
+            <Search size={13} className={pullDistance > 35 ? 'scale-125 transition-transform' : ''} />
+            <span>{pullDistance > 35 ? 'Отпустите для вызова поиска' : 'Оттяните для поиска по новостям'}</span>
+            <ChevronDown size={13} className={pullDistance > 35 ? 'rotate-180 transition-transform' : ''} />
+          </div>
+        </div>
+      )}
       {/* Hidden File Inputs */}
       <input
         type="file"
@@ -535,102 +734,161 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
             </span>
           </div>
 
-          {/* Friend Stories */}
-          {stories.map((s) => {
-            const isUnviewed = !s.viewed;
-            return (
-              <div
-                key={s.id}
-                onClick={() => handleOpenStory(s)}
-                className="flex flex-col items-center gap-1 shrink-0 cursor-pointer group"
-              >
-                <div
-                  className={`relative h-14 w-14 rounded-full p-[2px] transition-all ${
-                    isUnviewed
-                      ? 'animate-running-border shadow-md'
-                      : 'bg-slate-200 dark:bg-slate-800'
-                  }`}
-                >
-                  <div className="h-full w-full rounded-full bg-white dark:bg-slate-900 p-0.5 flex items-center justify-center">
-                    {s.userAvatar ? (
-                      <img src={s.userAvatar} alt={s.userName} className="h-full w-full rounded-full object-cover" />
-                    ) : (
-                      <div
-                        className={`h-full w-full rounded-full bg-gradient-to-br ${
-                          s.userColor || 'from-sky-300 to-indigo-200'
-                        } flex items-center justify-center text-xs font-bold text-white`}
-                      >
-                        {s.userInitials || s.userName.substring(0, 2).toUpperCase()}
-                      </div>
-                    )}
-                  </div>
-                </div>
-                <span className="text-[10px] font-semibold text-slate-700 dark:text-slate-300 truncate max-w-[62px]">
-                  {s.userName}
-                </span>
+          {/* Friend Stories Skeleton or Items */}
+          {isStoriesLoading && stories.length === 0 ? (
+            [1, 2, 3, 4].map((i) => (
+              <div key={`story_skel_${i}`} className="flex flex-col items-center gap-1 shrink-0 animate-pulse">
+                <div className="h-14 w-14 rounded-full bg-slate-200 dark:bg-slate-800" />
+                <div className="h-2.5 w-10 rounded bg-slate-200 dark:bg-slate-800 mt-0.5" />
               </div>
-            );
-          })}
+            ))
+          ) : (
+            userStoryGroups.map((group, groupIdx) => {
+              const isUnviewed = group.hasUnviewed;
+              return (
+                <div
+                  key={`story_group_${group.userId}_${groupIdx}`}
+                  onClick={() => {
+                    setSelectedStoryGroupIndex(groupIdx);
+                    setActiveStory(group.stories[0]);
+                  }}
+                  className="flex flex-col items-center gap-1 shrink-0 cursor-pointer group"
+                >
+                  <div
+                    className={`relative h-14 w-14 rounded-full p-[2px] transition-all ${
+                      isUnviewed
+                        ? 'animate-running-border shadow-md'
+                        : 'bg-slate-200 dark:bg-slate-800 opacity-60'
+                    }`}
+                  >
+                    <div className="h-full w-full rounded-full bg-white dark:bg-slate-900 p-0.5 flex items-center justify-center">
+                      {group.userAvatar ? (
+                        <img src={group.userAvatar} alt={group.userName} className="h-full w-full rounded-full object-cover" />
+                      ) : (
+                        <div
+                          className={`h-full w-full rounded-full bg-gradient-to-br ${
+                            group.userColor || 'from-sky-300 to-indigo-200'
+                          } flex items-center justify-center text-xs font-bold text-white`}
+                        >
+                          {group.userInitials || group.userName.substring(0, 2).toUpperCase()}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  <span className="text-[10px] font-semibold text-slate-700 dark:text-slate-300 truncate max-w-[62px]">
+                    {group.userName}
+                  </span>
+                </div>
+              );
+            })
+          )}
         </div>
       )}
 
-      {/* Floating Plus Button for Adding News (Platform Style) */}
-      <button
-        type="button"
-        onClick={() => {
-          if (isGuest) {
-            onOpenAuth();
-          } else {
+      {/* Floating Plus Button for Adding News (Strictly Fixed at Bottom-Right, Platform Style) */}
+      {!isGuest && (
+        <button
+          type="button"
+          onClick={() => {
             setEditingNews(null);
             setTitle('');
             setContent('');
             setMediaUrl('');
             setShowCreateModal(true);
-          }
-        }}
-        className="fixed bottom-20 right-5 z-40 h-13 w-13 rounded-full bg-gradient-to-tr from-sky-500 to-blue-600 text-white flex items-center justify-center shadow-lg shadow-sky-500/30 hover:shadow-xl hover:scale-105 active:scale-95 transition-all cursor-pointer border border-white/25"
-        title="Опубликовать новость"
-      >
-        <Plus size={24} strokeWidth={2.5} />
-      </button>
+          }}
+          className="fixed bottom-20 right-5 z-40 h-13 w-13 rounded-full bg-gradient-to-tr from-sky-500 to-blue-600 text-white flex items-center justify-center shadow-lg shadow-sky-500/30 hover:shadow-xl hover:scale-105 active:scale-95 transition-transform cursor-pointer border border-white/25"
+          title="Опубликовать новость"
+        >
+          <Plus size={24} strokeWidth={2.5} />
+        </button>
+      )}
 
-      {/* News Feed List (Redesigned Compact Block matching user photo) */}
+      {/* News Search Bubble (Minimalist floating capsule matching dialogue search) */}
+      {isSearchVisible && (
+        <div className="relative my-1 px-0.5 animate-fade-in">
+          <div className="flex items-center gap-2 px-3 py-2 rounded-2xl bg-white/90 dark:bg-slate-900/90 border border-slate-200/80 dark:border-slate-800 shadow-sm backdrop-blur-md">
+            <Search size={15} className="text-sky-500 shrink-0" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && searchQuery.trim()) {
+                  addSearchQueryToHistory(searchQuery, currentUser?.id);
+                  setFeedSettings(getStoredFeedSettings(currentUser?.id));
+                }
+              }}
+              placeholder="Поиск по новостям..."
+              className="w-full bg-transparent text-xs font-medium text-slate-900 dark:text-white placeholder:text-slate-400 outline-none"
+              autoFocus
+            />
+            {searchQuery && (
+              <button
+                type="button"
+                onClick={() => setSearchQuery('')}
+                className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 p-0.5 shrink-0 cursor-pointer"
+              >
+                <X size={14} />
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                setIsSearchVisible(false);
+                setSearchQuery('');
+              }}
+              className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 p-0.5 shrink-0 cursor-pointer"
+              title="Закрыть"
+            >
+              <ChevronUp size={15} />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* News Feed List */}
       <div className="space-y-3">
         {(() => {
-          const displayedNewsList = isGuest
-            ? newsList.filter((n) => {
-                const tagLower = (n.tag || '').toLowerCase();
-                const authorLower = (n.authorName || '').toLowerCase();
-                const isDevTag =
-                  tagLower.includes('обновлен') ||
-                  tagLower.includes('dev') ||
-                  tagLower.includes('план') ||
-                  tagLower.includes('разработ') ||
-                  tagLower.includes('релиз') ||
-                  tagLower.includes('безопасн') ||
-                  tagLower.includes('инфо') ||
-                  tagLower.includes('важн') ||
-                  tagLower.includes('система');
-                const isDevAuthor =
-                  authorLower.includes('orbit') ||
-                  authorLower.includes('разраб') ||
-                  authorLower.includes('admin') ||
-                  authorLower.includes('система') ||
-                  authorLower.includes('команда');
-                return isDevTag || isDevAuthor;
-              })
-            : newsList;
-
           if (isNewsLoading && displayedNewsList.length === 0) {
             return (
-              <div className="rounded-2xl bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800 p-12 text-center flex flex-col items-center justify-center gap-3">
-                <div className="relative flex items-center justify-center">
-                  <div className="h-10 w-10 rounded-full border-2 border-sky-500/20 border-t-sky-500 animate-spin" />
-                  <Loader2 size={18} className="animate-spin text-sky-500 absolute" />
-                </div>
-                <span className="text-xs font-semibold text-slate-600 dark:text-slate-300 animate-pulse">
-                  Загрузка новостей с сервера...
-                </span>
+              <div className="space-y-4">
+                {[1, 2, 3].map((skelId) => (
+                  <div
+                    key={`news_skel_${skelId}`}
+                    className="p-4 rounded-2xl bg-white dark:bg-slate-900 border border-slate-100 dark:border-slate-800/80 shadow-xs animate-pulse space-y-3"
+                  >
+                    {/* Skeleton Header */}
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2.5">
+                        <div className="h-9 w-9 rounded-full bg-slate-200 dark:bg-slate-800" />
+                        <div className="space-y-1.5">
+                          <div className="h-3.5 w-32 rounded bg-slate-200 dark:bg-slate-800" />
+                          <div className="h-2.5 w-20 rounded bg-slate-200 dark:bg-slate-800/60" />
+                        </div>
+                      </div>
+                      <div className="h-5 w-14 rounded-full bg-slate-200 dark:bg-slate-800" />
+                    </div>
+
+                    {/* Skeleton Post Content */}
+                    <div className="space-y-2 py-1">
+                      <div className="h-3.5 w-3/4 rounded bg-slate-200 dark:bg-slate-800" />
+                      <div className="h-3.5 w-full rounded bg-slate-200 dark:bg-slate-800" />
+                      <div className="h-3.5 w-2/3 rounded bg-slate-200 dark:bg-slate-800" />
+                    </div>
+
+                    {/* Skeleton Media Box */}
+                    <div className="h-44 w-full rounded-2xl bg-slate-200 dark:bg-slate-800/70" />
+
+                    {/* Skeleton Actions Bar */}
+                    <div className="flex items-center justify-between pt-1">
+                      <div className="flex items-center gap-3">
+                        <div className="h-7 w-14 rounded-full bg-slate-200 dark:bg-slate-800" />
+                        <div className="h-7 w-14 rounded-full bg-slate-200 dark:bg-slate-800" />
+                      </div>
+                      <div className="h-7 w-9 rounded-full bg-slate-200 dark:bg-slate-800" />
+                    </div>
+                  </div>
+                ))}
               </div>
             );
           }
@@ -756,37 +1014,59 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
 
                 {/* Body Content Row: Title & Content */}
                 <div className="my-2.5">
-                  <h3 className="font-bold text-sm sm:text-base text-slate-900 dark:text-white leading-tight line-clamp-2">
-                    {n.title}
-                  </h3>
-                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 leading-snug line-clamp-3 whitespace-pre-wrap">
-                    {n.content}
-                  </p>
+                  {n.title && !n.channelId && n.tag !== 'КАНАЛ' && (
+                    <h3 className="font-bold text-sm sm:text-base text-slate-900 dark:text-white leading-tight line-clamp-2">
+                      {n.title}
+                    </h3>
+                  )}
+                  {n.content && (
+                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 leading-snug line-clamp-3 whitespace-pre-wrap">
+                      {n.content}
+                    </p>
+                  )}
                 </div>
 
-                {/* Media Attachment (Photo / Video) - ONLY IF mediaUrl exists! Click photo to open full screen */}
+                {/* Media Attachment (Photo / Video) - ONLY IF mediaUrl exists! */}
                 {n.mediaUrl && (
-                  <div className="w-full h-48 sm:h-56 rounded-2xl overflow-hidden border border-slate-100 dark:border-slate-800 bg-slate-900 my-2.5 relative group">
-                    {n.mediaType === 'video' ? (
-                      <video src={n.mediaUrl} className="w-full h-full object-cover" muted />
-                    ) : (
-                      <div
-                        className="w-full h-full cursor-pointer relative"
-                        onClick={(e) => {
-                          e.stopPropagation();
+                  feedSettings.hideMediaOnly ? (
+                    <div
+                      className="my-2 p-2.5 rounded-xl bg-slate-100 dark:bg-slate-800/60 border border-slate-200/60 dark:border-slate-700/60 flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400 font-medium cursor-pointer hover:bg-slate-200/70 dark:hover:bg-slate-800 transition"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (n.mediaType === 'image') {
                           setFullScreenImage({ url: n.mediaUrl!, title: n.title });
-                        }}
-                      >
-                        <img src={n.mediaUrl} alt={n.title} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
-                        <div className="absolute inset-0 bg-black/20 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white">
-                          <div className="px-3 py-1.5 rounded-full bg-black/60 backdrop-blur-md text-[11px] font-semibold flex items-center gap-1.5 border border-white/20">
-                            <Maximize2 size={13} />
-                            <span>Открыть фото</span>
+                        }
+                      }}
+                    >
+                      <div className="flex items-center gap-2">
+                        <ImageIcon size={14} className="text-sky-500" />
+                        <span>Медиа вложение скрыто (Режим экономии трафика)</span>
+                      </div>
+                      <span className="text-sky-600 dark:text-sky-400 font-bold underline">Посмотреть</span>
+                    </div>
+                  ) : (
+                    <div className="w-full h-48 sm:h-56 rounded-2xl overflow-hidden border border-slate-100 dark:border-slate-800 bg-slate-900 my-2.5 relative group">
+                      {n.mediaType === 'video' ? (
+                        <video src={n.mediaUrl} className="w-full h-full object-cover" muted />
+                      ) : (
+                        <div
+                          className="w-full h-full cursor-pointer relative"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setFullScreenImage({ url: n.mediaUrl!, title: n.title });
+                          }}
+                        >
+                          <img src={n.mediaUrl} alt={n.title} className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300" />
+                          <div className="absolute inset-0 bg-black/20 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center text-white">
+                            <div className="px-3 py-1.5 rounded-full bg-black/60 backdrop-blur-md text-[11px] font-semibold flex items-center gap-1.5 border border-white/20">
+                              <Maximize2 size={13} />
+                              <span>Открыть фото</span>
+                            </div>
                           </div>
                         </div>
-                      </div>
-                    )}
-                  </div>
+                      )}
+                    </div>
+                  )
                 )}
 
                 {/* Footer Row: Timestamp & Interactive Buttons */}
@@ -824,9 +1104,26 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
                           alert('Ссылка скопирована!');
                         }
                       }}
-                      className="hover:text-sky-500 transition"
+                      className="hover:text-sky-500 transition cursor-pointer"
+                      title="Поделиться"
                     >
                       <Share2 size={14} />
+                    </button>
+
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleSaveNewsItem(n);
+                        if (typeof window !== 'undefined' && window.navigator && window.navigator.vibrate) {
+                          window.navigator.vibrate(10);
+                        }
+                      }}
+                      className={`hover:text-amber-500 transition cursor-pointer ${
+                        savedNewsIds.includes(n.id) ? 'text-amber-500 font-bold' : ''
+                      }`}
+                      title={savedNewsIds.includes(n.id) ? 'Удалить из избранного' : 'Сохранить в избранное'}
+                    >
+                      <Bookmark size={14} className={savedNewsIds.includes(n.id) ? 'fill-amber-500' : ''} />
                     </button>
                   </div>
                 </div>
@@ -908,9 +1205,11 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
 
             {/* Scrollable Content */}
             <div className="flex-1 overflow-y-auto no-scrollbar py-4 space-y-4">
-              <h2 className="text-lg font-bold text-slate-900 dark:text-white leading-snug">
-                {activeNewsModal.title}
-              </h2>
+              {activeNewsModal.title && !activeNewsModal.channelId && activeNewsModal.tag !== 'КАНАЛ' && (
+                <h2 className="text-lg font-bold text-slate-900 dark:text-white leading-snug">
+                  {activeNewsModal.title}
+                </h2>
+              )}
 
               {activeNewsModal.mediaUrl && (
                 <div className="w-full rounded-2xl overflow-hidden border border-slate-100 dark:border-slate-800 bg-black max-h-72 relative group">
@@ -1014,7 +1313,8 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
         currentUser={currentUser}
         onStoryCreated={(newStory) => {
           setStories((prev) => {
-            const next = [newStory, ...prev];
+            const filtered = prev.filter((s) => s.id !== newStory.id);
+            const next = [newStory, ...filtered];
             localStorage.setItem('orbit_stories_cache', JSON.stringify(next));
             return next;
           });
@@ -1025,8 +1325,17 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
       {activeStory && (
         <StoryViewer
           story={activeStory}
+          storyGroups={userStoryGroups}
+          initialGroupIndex={selectedStoryGroupIndex}
           currentUser={currentUser}
           onClose={() => setActiveStory(null)}
+          onStoryViewed={(storyId) => {
+            setStories((prev) => {
+              const next = prev.map((s) => (s.id === storyId ? { ...s, viewed: true } : s));
+              localStorage.setItem('orbit_stories_cache', JSON.stringify(next));
+              return next;
+            });
+          }}
           onDeleteStory={(deletedId) => {
             setStories((prev) => {
               const next = prev.filter((s) => s.id !== deletedId);
@@ -1047,7 +1356,7 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
       {/* Create / Edit News Modal */}
       {showCreateModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-md animate-fade-in">
-          <div className="relative w-full max-w-sm rounded-3xl p-5 shadow-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-800 dark:text-white">
+          <div className="relative w-full max-w-sm rounded-3xl p-5 shadow-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 text-slate-800 dark:text-white max-h-[90vh] overflow-y-auto no-scrollbar">
             <button
               onClick={() => setShowCreateModal(false)}
               className="absolute top-4 right-4 h-8 w-8 rounded-full bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 transition"
@@ -1101,45 +1410,182 @@ export const FeedScreen: React.FC<FeedScreenProps> = ({
                 />
               </div>
 
-              {/* Media Attachment Button */}
+              {/* News Audience Selector */}
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-xs font-semibold text-slate-600 dark:text-slate-300">
+                    Видимость новости
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => setIsGroupsModalOpen(true)}
+                    className="text-[11px] font-bold text-sky-500 hover:text-sky-600 transition flex items-center gap-1"
+                  >
+                    <Plus size={12} /> Настроить группы
+                  </button>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setNewsAudience('everyone')}
+                    className={`py-2 px-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1 border transition ${
+                      newsAudience === 'everyone'
+                        ? 'bg-sky-500 text-white border-sky-500 shadow-xs'
+                        : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-transparent hover:bg-slate-200'
+                    }`}
+                  >
+                    <Users size={13} />
+                    <span>Все подписчики</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setNewsAudience('groups')}
+                    className={`py-2 px-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1 border transition ${
+                      newsAudience === 'groups'
+                        ? 'bg-indigo-500 text-white border-indigo-500 shadow-xs'
+                        : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-transparent hover:bg-slate-200'
+                    }`}
+                  >
+                    <UserCheck size={13} />
+                    <span>Группы</span>
+                  </button>
+                </div>
+
+                {newsAudience === 'groups' && (
+                  <div className="mt-2 p-2.5 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 space-y-1.5 animate-in fade-in duration-150">
+                    <div className="text-[11px] font-bold text-slate-500 dark:text-slate-400">
+                      Выберите группы для показа новости:
+                    </div>
+                    {followerGroups.length === 0 ? (
+                      <div className="text-center py-2 text-xs text-slate-400">
+                        У вас нет созданных групп.{' '}
+                        <button
+                          type="button"
+                          onClick={() => setIsGroupsModalOpen(true)}
+                          className="text-sky-500 font-bold underline"
+                        >
+                          Создать группу
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="space-y-1 max-h-28 overflow-y-auto no-scrollbar">
+                        {followerGroups.map((g) => {
+                          const isChecked = newsTargetGroups.includes(g.id);
+                          return (
+                            <label
+                              key={g.id}
+                              className={`flex items-center justify-between p-1.5 rounded-xl text-xs font-medium cursor-pointer transition select-none ${
+                                isChecked
+                                  ? 'bg-sky-50 dark:bg-sky-950/40 text-sky-700 dark:text-sky-300 border border-sky-200 dark:border-sky-800'
+                                  : 'hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300'
+                              }`}
+                            >
+                              <span>{g.name}</span>
+                              <input
+                                type="checkbox"
+                                checked={isChecked}
+                                onChange={() => {
+                                  setNewsTargetGroups((prev) =>
+                                    prev.includes(g.id) ? prev.filter((id) => id !== g.id) : [...prev, g.id]
+                                  );
+                                }}
+                                className="h-3.5 w-3.5 rounded accent-sky-500 cursor-pointer"
+                              />
+                            </label>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Media Attachment Section */}
               <div>
                 <label className="block text-xs font-semibold mb-1 text-slate-600 dark:text-slate-300">
                   Прикрепить медиафайлы
                 </label>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => newsFileInputRef.current?.click()}
-                    className="px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-xs font-medium text-slate-700 dark:text-slate-300 flex items-center gap-1.5 transition"
-                  >
-                    <ImageIcon size={14} />
-                    <span>Выбрать с устройства</span>
-                  </button>
-                  {mediaUrl && (
-                    <span className="text-[11px] text-emerald-500 font-semibold flex items-center gap-1">
-                      <Check size={12} /> Медиа прикреплено
-                    </span>
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={isUploadingNewsMedia}
+                      onClick={() => newsFileInputRef.current?.click()}
+                      className="px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 disabled:opacity-50 text-xs font-medium text-slate-700 dark:text-slate-300 flex items-center gap-1.5 transition"
+                    >
+                      {isUploadingNewsMedia ? (
+                        <Loader2 size={14} className="animate-spin text-sky-500" />
+                      ) : (
+                        <ImageIcon size={14} />
+                      )}
+                      <span>{isUploadingNewsMedia ? 'Сжатие и обработка...' : 'Выбрать с устройства'}</span>
+                    </button>
+                    {mediaUrl && !isUploadingNewsMedia && (
+                      <span className="text-[11px] text-emerald-500 font-semibold flex items-center gap-1">
+                        <Check size={12} /> Готово
+                      </span>
+                    )}
+                  </div>
+
+                  {/* Media Preview & Detach Button */}
+                  {mediaUrl && !isUploadingNewsMedia && (
+                    <div className="relative rounded-2xl overflow-hidden border border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-slate-950 max-h-36 flex items-center justify-center group">
+                      {mediaType === 'video' ? (
+                        <video src={mediaUrl} controls className="max-h-36 w-full object-cover rounded-2xl" />
+                      ) : (
+                        <img src={mediaUrl} alt="Preview" className="max-h-36 w-full object-cover rounded-2xl" />
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => setMediaUrl('')}
+                        className="absolute top-2 right-2 p-1.5 rounded-full bg-slate-900/80 text-white hover:bg-red-600 transition shadow-md"
+                        title="Удалить медиафайл"
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </div>
                   )}
                 </div>
               </div>
 
               <button
                 type="submit"
-                disabled={isPublishing}
+                disabled={isPublishing || isUploadingNewsMedia}
                 className="w-full mt-2 py-2.5 rounded-2xl bg-sky-500 hover:bg-sky-400 disabled:opacity-50 text-white text-xs font-semibold flex items-center justify-center gap-2 shadow-md shadow-sky-500/20 transition"
               >
-                <span>{isPublishing ? 'Сохранение...' : editingNews ? 'Сохранить изменения' : 'Опубликовать'}</span>
-                <Send size={14} />
+                {isPublishing ? (
+                  <>
+                    <Loader2 size={14} className="animate-spin" />
+                    <span>Публикация...</span>
+                  </>
+                ) : isUploadingNewsMedia ? (
+                  <>
+                    <Loader2 size={14} className="animate-spin" />
+                    <span>Загрузка медиа...</span>
+                  </>
+                ) : (
+                  <>
+                    <span>{editingNews ? 'Сохранить изменения' : 'Опубликовать'}</span>
+                    <Send size={14} />
+                  </>
+                )}
               </button>
             </form>
           </div>
         </div>
       )}
 
-      {/* Toast Notification */}
+      {/* Follower Groups Modal */}
+      <FollowerGroupsModal
+        isOpen={isGroupsModalOpen}
+        onClose={() => setIsGroupsModalOpen(false)}
+        onGroupsUpdated={(updated) => setFollowerGroups(updated)}
+      />
+
+      {/* Toast Notification (Platform Glassmorphism Style) */}
       {toastMessage && (
-        <div className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-2xl bg-slate-900 text-white text-xs font-semibold shadow-2xl flex items-center gap-2 border border-slate-700 animate-fade-in">
-          <Check size={14} className="text-emerald-400" />
+        <div className="fixed bottom-20 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-2xl bg-white/85 dark:bg-slate-900/85 backdrop-blur-xl border border-slate-200/80 dark:border-slate-800/80 shadow-xl text-slate-600 dark:text-slate-300 text-xs font-medium tracking-tight animate-fade-in text-center whitespace-nowrap pointer-events-none">
           <span>{toastMessage}</span>
         </div>
       )}

@@ -1,0 +1,112 @@
+{
+  "users": [
+    {
+      "id": "usr_1785876221673_6hs5z",
+      "username": "Adm Mda",
+      "email": "krainov288@gmail.com",
+      "phone": "+79990000000",
+      "passwordHash": "$2b$10$UCRG9MeYO71IoRcSqG9ELugvmPBpwSOEZemnFWA8.gXo0bNaOCwrm",
+      "avatarColor": "from-violet-300 to-indigo-200",
+      "initials": "AM",
+      "handle": "@admin",
+      "balance": 100000,
+      "createdAt": "2026-08-04T20:43:41.673Z",
+      "firstName": "Adm",
+      "lastName": "Mda",
+      "country": "Россия",
+      "language": "ru",
+      "role": "sysadmin"
+    }
+  ],
+  "messages": [],
+  "transactions": [],
+  "news": [],
+  "notifications": [],
+  "contactRelations": [],
+  "blockedUsers": [],
+  "reports": [],
+  "announcements": [],
+  "auditLogs": [
+    {
+      "id": "log_1785937177870_qlcd",
+      "actorId": "usr_1785876221673_6hs5z",
+      "actorName": "Adm Mda",
+      "action": "АВТОРИЗАЦИЯ",
+      "details": "Успешный вход в аккаунт krainov288@gmail.com",
+      "timestamp": 1785937177870
+    },
+    {
+      "id": "log_1785878535246_tm7q",
+      "actorId": "usr_1785876221673_6hs5z",
+      "actorName": "Adm Mda",
+      "action": "АВТОРИЗАЦИЯ",
+      "details": "Успешный вход в аккаунт krainov288@gmail.com",
+      "timestamp": 1785878535246
+    },
+    {
+      "id": "log_1785878444183_gfvn",
+      "actorId": "usr_1785878443850_t0b0f",
+      "actorName": "Admin Den",
+      "action": "ОБНОВЛЕНИЕ_ПРОФИЛЯ",
+      "details": "Обновлен профиль (firstName, lastName, username, initials, country, language)",
+      "timestamp": 1785878444183
+    },
+    {
+      "id": "log_1785878443851_x4wm",
+      "actorId": "usr_1785878443850_t0b0f",
+      "actorName": "Admin Den",
+      "action": "РЕГИСТРАЦИЯ",
+      "details": "Зарегистрирован пользователь krainov288@gmail.co (+799900099900)",
+      "timestamp": 1785878443851
+    },
+    {
+      "id": "log_1785878404033_2emn",
+      "actorId": "usr_1785876221673_6hs5z",
+      "actorName": "Adm Mda",
+      "action": "АВТОРИЗАЦИЯ",
+      "details": "Успешный вход в аккаунт krainov288@gmail.com",
+      "timestamp": 1785878404033
+    },
+    {
+      "id": "log_1785878397936_3c3x",
+      "actorId": "usr_1785876221673_6hs5z",
+      "actorName": "Adm Mda",
+      "action": "АВТОРИЗАЦИЯ",
+      "details": "Успешный вход в аккаунт krainov288@gmail.com",
+      "timestamp": 1785878397936
+    },
+    {
+      "id": "log_1785878393006_gsk2",
+      "actorId": "usr_1785876221673_6hs5z",
+      "actorName": "Adm Mda",
+      "action": "АВТОРИЗАЦИЯ",
+      "details": "Успешный вход в аккаунт krainov288@gmail.com",
+      "timestamp": 1785878393006
+    },
+    {
+      "id": "log_1785876390797_uwu8",
+      "actorId": "usr_1785876221673_6hs5z",
+      "actorName": "Adm Mda",
+      "action": "АВТОРИЗАЦИЯ",
+      "details": "Успешный вход в аккаунт krainov288@gmail.com",
+      "timestamp": 1785876390797
+    },
+    {
+      "id": "log_1785876282584_bnyy",
+      "actorId": "usr_1785876221673_6hs5z",
+      "actorName": "Adm Mda",
+      "action": "ОБНОВЛЕНИЕ_ПРОФИЛЯ",
+      "details": "Обновлен профиль (firstName, lastName, username, initials, country, language)",
+      "timestamp": 1785876282584
+    },
+    {
+      "id": "log_1785876221675_s0di",
+      "actorId": "usr_1785876221673_6hs5z",
+      "actorName": "Adm Mda",
+      "action": "РЕГИСТРАЦИЯ",
+      "details": "Зарегистрирован пользователь krainov288@gmail.com (+79990000000)",
+      "timestamp": 1785876221675
+    }
+  ],
+  "channelsGroups": []
+}

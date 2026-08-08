@@ -1,5 +1,11 @@
 export type UserRole = 'user' | 'support' | 'admin' | 'sysadmin';
 
+export interface FollowerGroup {
+  id: string;
+  name: string;
+  memberIds: string[];
+}
+
 export interface StoryComment {
   id: string;
   userId: string;
@@ -28,7 +34,8 @@ export interface Story {
   caption?: string;
   timestamp: number;
   viewed?: boolean;
-  audience?: 'everyone' | 'close_friends' | 'contacts';
+  audience?: 'everyone' | 'close_friends' | 'contacts' | 'groups';
+  targetGroups?: string[];
   hideComments?: boolean;
   hideReactions?: boolean;
   allowedReactions?: string[];
@@ -59,6 +66,7 @@ export interface User {
   isEmailVerified?: boolean;
   following?: string[]; // array of userIds
   followers?: string[]; // array of userIds
+  followerGroups?: FollowerGroup[];
 }
 
 export interface SharedMediaItem {
@@ -99,6 +107,10 @@ export interface Contact {
   disableComments?: boolean;
   disableForwarding?: boolean;
   isMember?: boolean;
+  bgPattern?: string;
+  bgOpacity?: number;
+  bgAdaptTheme?: boolean;
+  bgImageUrl?: string;
 }
 export interface MessageReactionInfo {
   count: number;
@@ -121,6 +133,7 @@ export interface Message {
   mediaUrl?: string;
   mediaType?: 'image' | 'file' | 'audio' | 'video_circle' | 'sticker' | 'document';
   duration?: number;
+  waveform?: number[];
   fileName?: string;
   fileSize?: string;
   amount?: number;
@@ -136,6 +149,23 @@ export interface Message {
   forwardedFrom?: string;
   authorName?: string;
   viewsCount?: number;
+}
+
+export interface ScheduledMessage {
+  id: string;
+  contactId: string;
+  text: string;
+  scheduledAt: number;
+  createdAt: number;
+  pendingMedia?: {
+    url: string;
+    mediaType?: 'image' | 'file' | 'audio' | 'video_circle' | 'sticker' | 'document';
+    fileName?: string;
+    fileSize?: string;
+    duration?: number;
+    waveform?: number[];
+  } | null;
+  replyTo?: MessageReplyInfo;
 }
 
 export interface Transaction {
@@ -176,6 +206,8 @@ export interface NewsItem {
   commentsCount?: number;
   comments?: NewsComment[];
   sharesCount?: number;
+  audience?: 'everyone' | 'groups';
+  targetGroups?: string[];
 }
 
 export type CallType = 'voice' | 'video' | 'group_conference' | 'channel_stream';
@@ -204,6 +236,11 @@ export interface ChannelGroup {
   disableComments?: boolean;
   disableForwarding?: boolean;
   isMember?: boolean;
+  invitations?: Record<string, { inviterId: string; inviterName: string; timestamp: number }>;
+  bgPattern?: string;
+  bgOpacity?: number;
+  bgAdaptTheme?: boolean;
+  bgImageUrl?: string;
 }
 
 export interface AppNotification {
@@ -213,6 +250,8 @@ export interface AppNotification {
   body: string;
   timestamp: number;
   isRead: boolean;
+  senderId?: string;
+  channelGroupId?: string;
 }
 
 export interface SystemAnnouncement {

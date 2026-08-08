@@ -26,6 +26,7 @@ export interface DBUser {
   isEmailVerified?: boolean;
   following?: string[];
   followers?: string[];
+  followerGroups?: { id: string; name: string; memberIds: string[] }[];
 }
 
 export interface DBStoryComment {
@@ -52,7 +53,8 @@ export interface DBStory {
   caption?: string;
   timestamp: number;
   viewedBy?: string[];
-  audience?: 'everyone' | 'close_friends' | 'contacts';
+  audience?: 'everyone' | 'close_friends' | 'contacts' | 'groups';
+  targetGroups?: string[];
   hideComments?: boolean;
   hideReactions?: boolean;
   allowedReactions?: string[];
@@ -66,7 +68,14 @@ export interface DBMessage {
   recipientId: string;
   text: string;
   mediaUrl?: string;
-  mediaType?: 'image' | 'file' | 'audio' | 'video_circle';
+  mediaType?: 'image' | 'file' | 'audio' | 'video_circle' | 'sticker' | 'document';
+  duration?: number;
+  waveform?: number[];
+  fileName?: string;
+  fileSize?: string;
+  isEncrypted?: boolean;
+  replyTo?: any;
+  authorName?: string;
   amount?: number;
   isTx?: boolean;
   timestamp: number;
@@ -110,6 +119,8 @@ export interface DBNews {
   likes?: string[];
   comments?: DBNewsComment[];
   sharesCount?: number;
+  audience?: 'everyone' | 'groups';
+  targetGroups?: string[];
 }
 
 export type ChannelGroupType = 'public_channel' | 'private_channel' | 'public_group' | 'private_group' | 'closed_group';
@@ -136,6 +147,11 @@ export interface DBChannelGroup {
   disableReactions?: boolean;
   disableComments?: boolean;
   disableForwarding?: boolean;
+  invitations?: Record<string, { inviterId: string; inviterName: string; timestamp: number }>;
+  bgPattern?: string;
+  bgOpacity?: number;
+  bgAdaptTheme?: boolean;
+  bgImageUrl?: string;
 }
 
 export interface DBNotification {
@@ -145,6 +161,8 @@ export interface DBNotification {
   body: string;
   timestamp: number;
   isRead: boolean;
+  senderId?: string;
+  channelGroupId?: string;
 }
 
 export interface DBContactRelation {
@@ -244,45 +262,39 @@ class Database {
       if (fs.existsSync(DB_FILE)) {
         const fileContent = fs.readFileSync(DB_FILE, 'utf-8');
         const parsed = JSON.parse(fileContent) as DBData;
-        // Purge old demo users or initial demo news if present
-        if (parsed.users) {
-          parsed.users = parsed.users.filter(u => !u.id.startsWith('demo_user_'));
-          // Ensure valid balances
-          parsed.users.forEach(u => {
-            const role = this.getUserRole(u);
-            const isAdmin = role === 'admin' || role === 'sysadmin' || u.username.toLowerCase() === 'admin' || u.handle.toLowerCase() === '@admin';
-            if (isAdmin) {
-              if (u.balance === undefined || u.balance === null || u.balance < 100000) {
-                u.balance = 100000;
-              }
-            } else {
-              if (u.balance === undefined || u.balance === null || u.balance === 1000) {
-                u.balance = 0;
-              }
+        if (!parsed.users) parsed.users = [];
+        if (!parsed.messages) parsed.messages = [];
+        if (!parsed.transactions) parsed.transactions = [];
+        if (!parsed.news) parsed.news = [];
+        if (!parsed.notifications) parsed.notifications = [];
+        if (!parsed.contactRelations) parsed.contactRelations = [];
+        if (!parsed.blockedUsers) parsed.blockedUsers = [];
+        if (!parsed.reports) parsed.reports = [];
+        if (!parsed.announcements) parsed.announcements = [];
+        if (!parsed.auditLogs) parsed.auditLogs = [];
+        if (!parsed.stories) parsed.stories = [];
+        if (!parsed.channelsGroups) parsed.channelsGroups = [];
+
+        // Ensure valid balances for users
+        parsed.users.forEach((u) => {
+          const role = this.getUserRole(u);
+          const isAdmin =
+            role === 'admin' ||
+            role === 'sysadmin' ||
+            u.username.toLowerCase() === 'admin' ||
+            u.handle.toLowerCase() === '@admin' ||
+            u.email.toLowerCase() === 'krainov288@gmail.com';
+          if (isAdmin) {
+            if (u.balance === undefined || u.balance === null) {
+              u.balance = 100000;
             }
-          });
-        }
-        if (parsed.news) {
-          parsed.news = parsed.news.filter(n => !n.id.startsWith('news_1') && !n.id.startsWith('news_2'));
-        }
-        if (parsed.messages) {
-          parsed.messages = parsed.messages.filter(m => !m.senderId.startsWith('demo_user_') && !m.recipientId.startsWith('demo_user_'));
-        }
-        if (parsed.stories) {
-          // Clean up oversized base64 data strings that bloat DB
-          parsed.stories.forEach((s) => {
-            if (s.mediaUrl && s.mediaUrl.startsWith('data:') && s.mediaUrl.length > 3000) {
-              s.mediaUrl = 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=800&auto=format&fit=crop&q=80';
+          } else {
+            if (u.balance === undefined || u.balance === null) {
+              u.balance = 0;
             }
-            if (s.slides) {
-              s.slides = s.slides.map((slide) =>
-                slide && slide.startsWith('data:') && slide.length > 3000
-                  ? 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=800&auto=format&fit=crop&q=80'
-                  : slide
-              );
-            }
-          });
-        }
+          }
+        });
+
         this.saveData(parsed);
         return parsed;
       }
@@ -379,9 +391,7 @@ class Database {
   // Stories Operations
   public getStories(): DBStory[] {
     if (!this.data.stories) return [];
-    // Only return stories from last 24 hours
-    const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
-    return this.data.stories.filter((s) => s.timestamp >= dayAgo);
+    return this.data.stories;
   }
 
   public getStoryById(id: string): DBStory | undefined {
@@ -772,6 +782,14 @@ class Database {
     if (updated) this.save();
   }
 
+  public markSingleMessageAsRead(messageId: string): void {
+    const msg = this.data.messages.find((m) => m.id === messageId);
+    if (msg && !msg.isRead) {
+      msg.isRead = true;
+      this.save();
+    }
+  }
+
   public toggleMessageReaction(messageId: string, userId: string, emoji: string): Record<string, string[]> {
     let msg = this.data.messages.find((m) => m.id === messageId);
     if (!msg) {
@@ -790,13 +808,24 @@ class Database {
     if (!msg.reactions) msg.reactions = {};
     if (!msg.reactions[emoji]) msg.reactions[emoji] = [];
 
-    const userIdx = msg.reactions[emoji].indexOf(userId);
+    const userIdx = msg.reactions[emoji]?.indexOf(userId) ?? -1;
     if (userIdx !== -1) {
       msg.reactions[emoji].splice(userIdx, 1);
       if (msg.reactions[emoji].length === 0) {
         delete msg.reactions[emoji];
       }
     } else {
+      // Enforce strictly one reaction per user: remove user from any other emoji key
+      for (const eKey of Object.keys(msg.reactions)) {
+        const idx = msg.reactions[eKey].indexOf(userId);
+        if (idx !== -1) {
+          msg.reactions[eKey].splice(idx, 1);
+          if (msg.reactions[eKey].length === 0) {
+            delete msg.reactions[eKey];
+          }
+        }
+      }
+      if (!msg.reactions[emoji]) msg.reactions[emoji] = [];
       msg.reactions[emoji].push(userId);
     }
     this.save();

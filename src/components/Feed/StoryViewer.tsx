@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Story, User } from '../../types';
+import { UserStoryGroup } from '../../utils/storyGroups';
 import {
   X,
   MessageCircle,
@@ -11,29 +12,38 @@ import {
   Volume2,
   VolumeX,
   Loader2,
+  ChevronRight,
+  ChevronLeft,
 } from 'lucide-react';
 import { api } from '../../services/api';
 import { isVideoUrl } from '../../utils/media';
 import { triggerHaptic } from '../../utils/haptics';
 
 interface StoryViewerProps {
-  story: Story;
+  story?: Story;
+  storyGroups?: UserStoryGroup[];
+  initialGroupIndex?: number;
   currentUser?: User | null;
   onClose: () => void;
   onDeleteStory?: (storyId: string) => void;
   onUpdateStory?: (updatedStory: Story) => void;
+  onStoryViewed?: (storyId: string) => void;
 }
 
 export const StoryViewer: React.FC<StoryViewerProps> = ({
   story,
+  storyGroups = [],
+  initialGroupIndex = 0,
   currentUser,
   onClose,
   onDeleteStory,
   onUpdateStory,
+  onStoryViewed,
 }) => {
-  const slides = story.slides && story.slides.length > 0 ? story.slides : [story.mediaUrl];
-  const [activeSlideIndex, setActiveSlideIndex] = useState(0);
-  const [progress, setProgress] = useState(0);
+  const [activeGroupIndex, setActiveGroupIndex] = useState<number>(initialGroupIndex);
+  const [activeStoryIndex, setActiveStoryIndex] = useState<number>(0);
+  const [activeSlideIndex, setActiveSlideIndex] = useState<number>(0);
+  const [progress, setProgress] = useState<number>(0);
   const [isPaused, setIsPaused] = useState(false);
   const [commentText, setCommentText] = useState('');
   const [showCommentsModal, setShowCommentsModal] = useState(false);
@@ -44,9 +54,24 @@ export const StoryViewer: React.FC<StoryViewerProps> = ({
   const [isMuted, setIsMuted] = useState(false);
   const [isMediaLoading, setIsMediaLoading] = useState(true);
 
+  // Active group & current story resolution
+  const currentGroup = storyGroups && storyGroups.length > 0 ? storyGroups[activeGroupIndex] : null;
+  const currentStoryProp = currentGroup ? currentGroup.stories[activeStoryIndex] : story;
+
+  // Local story state for reactive updates
+  const [currentStory, setCurrentStory] = useState<Story | undefined>(currentStoryProp);
+
+  useEffect(() => {
+    setCurrentStory(currentStoryProp);
+    setActiveSlideIndex(0);
+    setProgress(0);
+  }, [currentStoryProp?.id, activeGroupIndex, activeStoryIndex]);
+
+  const slides = currentStory?.slides && currentStory.slides.length > 0 ? currentStory.slides : [currentStory?.mediaUrl || ''];
+
   useEffect(() => {
     setIsMediaLoading(true);
-  }, [activeSlideIndex]);
+  }, [activeSlideIndex, currentStory?.id]);
 
   // Floating reaction picker on long-press
   const [showReactionPicker, setShowReactionPicker] = useState(false);
@@ -62,9 +87,6 @@ export const StoryViewer: React.FC<StoryViewerProps> = ({
   // Bottom-right reaction pop animations queue
   const [bottomRightAnims, setBottomRightAnims] = useState<Array<{ id: string; emoji: string }>>([]);
 
-  // Local story state for reactive updates
-  const [currentStory, setCurrentStory] = useState<Story>(story);
-
   const SLIDE_DURATION = 5000; // 5 seconds per slide
   const longPressTimerRef = useRef<NodeJS.Timeout | null>(null);
   const isLongPressRef = useRef<boolean>(false);
@@ -73,82 +95,62 @@ export const StoryViewer: React.FC<StoryViewerProps> = ({
   const singleTapTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [doubleTapHeart, setDoubleTapHeart] = useState<{ id: string; emoji: string } | null>(null);
 
-  const isOwner = currentUser?.id ? String(currentUser.id) === String(currentStory.userId) : true;
+  const isOwner = currentUser?.id && currentStory?.userId ? String(currentUser.id) === String(currentStory.userId) : true;
   const isAdmin = currentUser?.role === 'admin' || currentUser?.role === 'sysadmin';
   const canManage = isOwner || isAdmin;
 
   // Sync active comment index to the latest comment when comments change
   useEffect(() => {
-    if (currentStory.comments && currentStory.comments.length > 0) {
+    if (currentStory?.comments && currentStory.comments.length > 0) {
       setActiveCommentIndex(currentStory.comments.length - 1);
     }
-  }, [currentStory.comments?.length]);
+  }, [currentStory?.comments?.length]);
 
-  // Sync local story state if prop changes
+  // Mark story as viewed on mount / story change
   useEffect(() => {
-    setCurrentStory(story);
-  }, [story]);
-
-  // Mark story as viewed on mount
-  useEffect(() => {
-    if (!currentStory.viewed) {
+    if (currentStory && !currentStory.viewed) {
       api.markStoryViewed(currentStory.id).catch(() => {});
-      setCurrentStory((prev) => ({ ...prev, viewed: true }));
+      setCurrentStory((prev) => (prev ? { ...prev, viewed: true } : prev));
+      if (onStoryViewed) onStoryViewed(currentStory.id);
     }
-  }, [currentStory.id]);
+  }, [currentStory?.id]);
 
-  // Slide timer progress & auto-pause conditions
+  // Sync props to active group/story indices
   useEffect(() => {
-    if (
-      isPaused ||
-      showCommentsModal ||
-      showSettingsModal ||
-      showReactionPicker ||
-      isCommentInputFocused ||
-      showConfirmDelete
-    ) {
-      return;
-    }
-
-    const interval = 50; // update every 50ms
-    const timer = setInterval(() => {
-      setProgress((prev) => {
-        const next = prev + (interval / SLIDE_DURATION) * 100;
-        if (next >= 100) {
-          if (activeSlideIndex < slides.length - 1) {
-            setActiveSlideIndex((idx) => idx + 1);
-            return 0;
-          } else {
-            clearInterval(timer);
-            setTimeout(() => {
-              onClose();
-            }, 0);
-            return 100;
-          }
+    if (storyGroups && storyGroups.length > 0) {
+      let gIdx = initialGroupIndex >= 0 && initialGroupIndex < storyGroups.length ? initialGroupIndex : -1;
+      if (gIdx === -1 && story) {
+        gIdx = storyGroups.findIndex((g) => g.stories.some((s) => s.id === story.id));
+      }
+      if (gIdx >= 0) {
+        setActiveGroupIndex(gIdx);
+        if (story) {
+          const sIdx = storyGroups[gIdx].stories.findIndex((s) => s.id === story.id);
+          if (sIdx >= 0) setActiveStoryIndex(sIdx);
         }
-        return next;
-      });
-    }, interval);
+      }
+    }
+  }, [story?.id, initialGroupIndex, storyGroups?.length]);
 
-    return () => clearInterval(timer);
-  }, [
-    activeSlideIndex,
-    slides.length,
-    isPaused,
-    showCommentsModal,
-    showSettingsModal,
-    showReactionPicker,
-    isCommentInputFocused,
-    showConfirmDelete,
-    onClose,
-  ]);
-
+  // Handle Next Slide / Next Story / Next User Group
   const handleNextSlide = (e?: React.MouseEvent) => {
     e?.stopPropagation();
     if (activeSlideIndex < slides.length - 1) {
       setActiveSlideIndex((prev) => prev + 1);
       setProgress(0);
+    } else if (currentGroup && activeStoryIndex < currentGroup.stories.length - 1) {
+      // Advance to next story of same user
+      setActiveStoryIndex((prev) => prev + 1);
+      setActiveSlideIndex(0);
+      setProgress(0);
+    } else if (storyGroups && activeGroupIndex < storyGroups.length - 1) {
+      // Advance to next user group automatically!
+      setActiveGroupIndex((prev) => prev + 1);
+      setActiveStoryIndex(0);
+      setActiveSlideIndex(0);
+      setProgress(0);
     } else {
+      // End of all stories of all users
       onClose();
     }
   };
@@ -158,8 +160,72 @@ export const StoryViewer: React.FC<StoryViewerProps> = ({
     if (activeSlideIndex > 0) {
       setActiveSlideIndex((prev) => prev - 1);
       setProgress(0);
+    } else if (currentGroup && activeStoryIndex > 0) {
+      // Go to previous story of same user
+      const prevStoryIdx = activeStoryIndex - 1;
+      const prevStory = currentGroup.stories[prevStoryIdx];
+      const prevSlides = prevStory?.slides && prevStory.slides.length > 0 ? prevStory.slides : [prevStory?.mediaUrl || ''];
+      setActiveStoryIndex(prevStoryIdx);
+      setActiveSlideIndex(prevSlides.length - 1);
+      setProgress(0);
+    } else if (storyGroups && activeGroupIndex > 0) {
+      // Go to previous user group!
+      const prevGroupIdx = activeGroupIndex - 1;
+      const prevGroup = storyGroups[prevGroupIdx];
+      const lastStoryIdx = prevGroup.stories.length - 1;
+      const lastStory = prevGroup.stories[lastStoryIdx];
+      const prevSlides = lastStory?.slides && lastStory.slides.length > 0 ? lastStory.slides : [lastStory?.mediaUrl || ''];
+      setActiveGroupIndex(prevGroupIdx);
+      setActiveStoryIndex(lastStoryIdx);
+      setActiveSlideIndex(prevSlides.length - 1);
+      setProgress(0);
     }
   };
+
+  // Slide timer progress & auto-advance
+  useEffect(() => {
+    if (
+      isPaused ||
+      showCommentsModal ||
+      showSettingsModal ||
+      showReactionPicker ||
+      isCommentInputFocused ||
+      showConfirmDelete ||
+      isVideoUrl(slides[activeSlideIndex])
+    ) {
+      return;
+    }
+
+    const interval = 50; // update every 50ms
+    const timer = setInterval(() => {
+      setProgress((prev) => {
+        const next = prev + (interval / SLIDE_DURATION) * 100;
+        if (next >= 100) {
+          clearInterval(timer);
+          setTimeout(() => {
+            handleNextSlide();
+          }, 0);
+          return 100;
+        }
+        return next;
+      });
+    }, interval);
+
+    return () => clearInterval(timer);
+  }, [
+    activeGroupIndex,
+    activeStoryIndex,
+    activeSlideIndex,
+    slides.length,
+    isPaused,
+    showCommentsModal,
+    showSettingsModal,
+    showReactionPicker,
+    isCommentInputFocused,
+    showConfirmDelete,
+    currentGroup,
+    storyGroups,
+  ]);
 
   const spawnBottomRightAnimation = (emoji: string) => {
     const animId = `anim_${Date.now()}_${Math.random()}`;
@@ -353,6 +419,8 @@ export const StoryViewer: React.FC<StoryViewerProps> = ({
       handleCarouselPrev();
     }
   };
+
+  if (!currentStory) return null;
 
   return (
     <div
@@ -556,11 +624,23 @@ export const StoryViewer: React.FC<StoryViewerProps> = ({
               src={slides[activeSlideIndex]}
               autoPlay
               playsInline
-              loop
               muted={isMuted}
               onLoadedData={() => setIsMediaLoading(false)}
               onCanPlay={() => setIsMediaLoading(false)}
               onWaiting={() => setIsMediaLoading(true)}
+              onTimeUpdate={(e) => {
+                const video = e.currentTarget;
+                if (video.duration && video.duration > 0) {
+                  setProgress((video.currentTime / video.duration) * 100);
+                }
+              }}
+              onEnded={() => {
+                handleNextSlide();
+              }}
+              onError={() => {
+                setIsMediaLoading(false);
+                handleNextSlide();
+              }}
               className="max-h-[75vh] w-auto max-w-full rounded-2xl object-contain shadow-2xl transition-all duration-300"
             />
             <button
@@ -590,58 +670,60 @@ export const StoryViewer: React.FC<StoryViewerProps> = ({
           />
         )}
 
-        {/* Bottom-Left Glassmorphic Story Caption Container */}
-        {currentStory.caption && (
-          <div
-            onClick={(e) => e.stopPropagation()}
-            className="absolute bottom-20 left-4 right-4 z-30 max-w-[85%] text-white text-xs font-medium leading-relaxed bg-black/60 backdrop-blur-md px-3.5 py-2 rounded-2xl border border-white/15 max-h-24 overflow-y-auto no-scrollbar shadow-lg animate-fade-in pointer-events-auto"
-          >
-            {currentStory.caption}
-          </div>
-        )}
+        {/* Bottom-Left Story Caption & Comments Stack (No background boxes) */}
+        <div
+          onClick={(e) => e.stopPropagation()}
+          className="absolute bottom-3 left-4 right-16 z-30 flex flex-col items-start gap-1.5 pointer-events-auto select-none max-w-[85%]"
+        >
+          {/* Story Caption (Transparent, no background, with text-shadow) */}
+          {currentStory.caption && (
+            <div className="text-white text-xs font-semibold leading-normal drop-shadow-[0_2px_6px_rgba(0,0,0,0.95)] [text-shadow:_0_2px_6px_rgba(0,0,0,0.95)] max-h-20 overflow-y-auto no-scrollbar pr-2">
+              {currentStory.caption}
+            </div>
+          )}
 
-        {/* Bottom-Left Backgroundless Carousel for Comments */}
-        {!currentStory.hideComments && curComment && (
-          <div
-            onClick={(e) => e.stopPropagation()}
-            onTouchStart={handleCarouselTouchStart}
-            onTouchEnd={handleCarouselTouchEnd}
-            onWheel={(e) => {
-              if (e.deltaY > 0) handleCarouselNext();
-              else if (e.deltaY < 0) handleCarouselPrev();
-            }}
-            className="absolute bottom-3 left-4 z-30 flex flex-col items-start select-none cursor-pointer max-w-[85%]"
-          >
-            <div className="relative flex flex-col items-start gap-1">
-              {/* Stacked Carousel Layer Behind (Next comment peek) */}
-              {comments.length > 1 && nextComment && (
-                <div className="opacity-45 scale-95 origin-left pointer-events-none transition-all duration-300 flex items-center gap-1 text-[11px] text-white font-medium drop-shadow-[0_1px_3px_rgba(0,0,0,0.95)] [text-shadow:_0_1px_3px_rgba(0,0,0,0.95)]">
-                  <span className="font-bold opacity-80">{nextComment.userName}:</span>
-                  <span className="opacity-75">{formatSnippet(nextComment.text)}</span>
-                </div>
-              )}
+          {/* Bottom-Left Backgroundless Carousel for Comments */}
+          {!currentStory.hideComments && curComment && (
+            <div
+              onTouchStart={handleCarouselTouchStart}
+              onTouchEnd={handleCarouselTouchEnd}
+              onWheel={(e) => {
+                if (e.deltaY > 0) handleCarouselNext();
+                else if (e.deltaY < 0) handleCarouselPrev();
+              }}
+              className="flex flex-col items-start cursor-pointer w-full"
+            >
+              <div className="relative flex flex-col items-start gap-1">
+                {/* Stacked Carousel Layer Behind (Next comment peek) */}
+                {comments.length > 1 && nextComment && (
+                  <div className="opacity-45 scale-95 origin-left pointer-events-none transition-all duration-300 flex items-center gap-1 text-[11px] text-white font-medium drop-shadow-[0_1px_3px_rgba(0,0,0,0.95)] [text-shadow:_0_1px_3px_rgba(0,0,0,0.95)]">
+                    <span className="font-bold opacity-80">{nextComment.userName}:</span>
+                    <span className="opacity-75">{formatSnippet(nextComment.text)}</span>
+                  </div>
+                )}
 
-              {/* Foreground Active Comment (Truncated to 10 chars, No background box/bubble) */}
-              <div
-                onClick={() => {
-                  setShowCommentsModal(true);
-                  setIsPaused(true);
-                }}
-                className="flex items-center gap-1.5 text-xs text-white font-semibold drop-shadow-[0_1.5px_4px_rgba(0,0,0,0.95)] [text-shadow:_0_1.5px_4px_rgba(0,0,0,0.95)] hover:opacity-90 transition active:scale-98"
-              >
-                <div className="h-5 w-5 rounded-full bg-sky-500 text-white flex items-center justify-center text-[9px] font-bold shrink-0 shadow-sm">
-                  {curComment.userName?.substring(0, 1).toUpperCase()}
+                {/* Foreground Active Comment (Truncated to 10 chars, No background box/bubble) */}
+                <div
+                  onClick={() => {
+                    setShowCommentsModal(true);
+                    setIsPaused(true);
+                  }}
+                  className="flex items-center gap-1.5 text-xs text-white font-semibold drop-shadow-[0_1.5px_4px_rgba(0,0,0,0.95)] [text-shadow:_0_1.5px_4px_rgba(0,0,0,0.95)] hover:opacity-90 transition active:scale-98"
+                >
+                  <div className="h-5 w-5 rounded-full bg-sky-500 text-white flex items-center justify-center text-[9px] font-bold shrink-0 shadow-sm">
+                    {curComment.userName?.substring(0, 1).toUpperCase()}
+                  </div>
+                  <span className="font-bold text-sky-300 drop-shadow-[0_1.5px_3px_rgba(0,0,0,0.95)]">
+                    {curComment.userName}:
+                  </span>
+                  <span className="text-white font-semibold drop-shadow-[0_1.5px_3px_rgba(0,0,0,0.95)]">
+                    {formatSnippet(curComment.text)}
+                  </span>
                 </div>
-                <span className="font-bold text-sky-300 drop-shadow-[0_1.5px_3px_rgba(0,0,0,0.95)]">
-                  {curComment.userName}:
-                </span>
-                <span className="text-white font-semibold drop-shadow-[0_1.5px_3px_rgba(0,0,0,0.95)]">
-                  {formatSnippet(curComment.text)}
-                </span>
               </div>
             </div>
-          </div>
-        )}
+          )}
+        </div>
 
         {/* Bottom-Right Double-Tap Reaction Pop Animation */}
         <div className="absolute bottom-16 right-5 pointer-events-none z-40 flex flex-col items-end">

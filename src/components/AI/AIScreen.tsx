@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Send, Languages, TrendingUp, Loader2 } from 'lucide-react';
 import { api } from '../../services/api';
 import { User } from '../../types';
+import { Skeleton } from '../Common/Skeleton';
 
 interface AIScreenProps {
   isDark?: boolean;
@@ -151,9 +152,16 @@ export const AIScreen: React.FC<AIScreenProps> = ({
         ))}
 
         {loading && (
-          <div className="flex justify-start items-center gap-2 text-xs text-muted py-2">
-            <Loader2 size={14} className="animate-spin text-blue-500" />
-            <span>Orbit AI думает...</span>
+          <div className="flex justify-start animate-fade-in py-2">
+            <div className="p-4 rounded-2xl bg-white/70 dark:bg-slate-900/70 border border-slate-100 dark:border-slate-800/80 space-y-2.5 max-w-[85%] shadow-2xs">
+              <div className="flex items-center gap-2 text-xs font-semibold text-sky-500 pb-1">
+                <Loader2 size={13} className="animate-spin" />
+                <span>Orbit AI генерирует ответ...</span>
+              </div>
+              <Skeleton className="h-3.5 w-64 rounded-md" />
+              <Skeleton className="h-3.5 w-48 rounded-md" />
+              <Skeleton className="h-3.5 w-36 rounded-md" />
+            </div>
           </div>
         )}
 

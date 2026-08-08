@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Story, User } from '../../types';
+import { Story, User, FollowerGroup, Contact } from '../../types';
 import {
   X,
   Plus,
@@ -17,16 +17,19 @@ import {
   RefreshCw,
   Loader2,
   Check,
+  UserCheck,
 } from 'lucide-react';
 import { api } from '../../services/api';
 import { isVideoUrl, checkVideoDuration, processMediaFileForStory } from '../../utils/media';
 import { haptics } from '../../utils/haptics';
+import { FollowerGroupsModal } from './FollowerGroupsModal';
 
 interface StoryCreatorModalProps {
   isOpen: boolean;
   onClose: () => void;
   initialImageUrl?: string;
   currentUser?: User | null;
+  followersList?: Contact[];
   onStoryCreated: (newStory: Story) => void;
 }
 
@@ -35,12 +38,16 @@ export const StoryCreatorModal: React.FC<StoryCreatorModalProps> = ({
   onClose,
   initialImageUrl = '',
   currentUser,
+  followersList = [],
   onStoryCreated,
 }) => {
   const [slides, setSlides] = useState<string[]>([]);
   const [activeSlideIndex, setActiveSlideIndex] = useState<number>(0);
   const [caption, setCaption] = useState<string>('');
-  const [audience, setAudience] = useState<'everyone' | 'close_friends' | 'contacts'>('everyone');
+  const [audience, setAudience] = useState<'everyone' | 'groups'>('everyone');
+  const [targetGroups, setTargetGroups] = useState<string[]>([]);
+  const [followerGroups, setFollowerGroups] = useState<FollowerGroup[]>([]);
+  const [isGroupsModalOpen, setIsGroupsModalOpen] = useState(false);
   const [hideComments, setHideComments] = useState<boolean>(false);
   const [hideReactions, setHideReactions] = useState<boolean>(false);
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
@@ -59,9 +66,19 @@ export const StoryCreatorModal: React.FC<StoryCreatorModalProps> = ({
       setActiveSlideIndex(0);
       setCaption('');
       setIsProcessingFile(false);
+      loadGroups();
       haptics.tap();
     }
   }, [isOpen, initialImageUrl]);
+
+  const loadGroups = async () => {
+    try {
+      const groups = await api.getFollowerGroups();
+      setFollowerGroups(groups || []);
+    } catch (e) {
+      console.error('Failed to load follower groups in StoryCreatorModal', e);
+    }
+  };
 
   if (!isOpen) return null;
 
@@ -157,6 +174,12 @@ export const StoryCreatorModal: React.FC<StoryCreatorModalProps> = ({
       return;
     }
 
+    if (audience === 'groups' && targetGroups.length === 0) {
+      haptics.error();
+      alert('Выберите хотя бы одну группу подписчиков или переключите на "Все подписчики"');
+      return;
+    }
+
     haptics.medium();
     setIsSubmitting(true);
     try {
@@ -164,6 +187,7 @@ export const StoryCreatorModal: React.FC<StoryCreatorModalProps> = ({
       const created = await api.createStory(primaryUrl, caption.trim(), {
         slides: validSlides,
         audience,
+        targetGroups: audience === 'groups' ? targetGroups : [],
         hideComments,
         hideReactions,
       });
@@ -233,6 +257,13 @@ export const StoryCreatorModal: React.FC<StoryCreatorModalProps> = ({
         <div className="relative z-10 overflow-y-auto no-scrollbar space-y-4 pr-0.5 flex-1">
           {/* Preview Canvas */}
           <div className="relative h-64 w-full rounded-2xl bg-slate-100 dark:bg-slate-950/80 border border-slate-200/80 dark:border-slate-800/80 overflow-hidden flex items-center justify-center shadow-inner group">
+            {isProcessingFile && (
+              <div className="absolute inset-0 z-30 bg-slate-900/70 backdrop-blur-md flex flex-col items-center justify-center text-white p-4 space-y-2 animate-fade-in">
+                <Loader2 size={32} className="animate-spin text-sky-400" />
+                <span className="text-xs font-bold">⚡ Сжатие и загрузка медиафайла...</span>
+                <span className="text-[10px] text-slate-300">Оптимизация размера изображения в реальном времени</span>
+              </div>
+            )}
             {currentSlideUrl ? (
               isVideoUrl(currentSlideUrl) ? (
                 <video
@@ -426,59 +457,114 @@ export const StoryCreatorModal: React.FC<StoryCreatorModalProps> = ({
 
             {/* Audience Selector */}
             <div>
-              <label className="block text-xs font-bold mb-1 text-slate-700 dark:text-slate-300">
-                Видимость истории
-              </label>
-              <div className="grid grid-cols-3 gap-1.5">
+              <div className="flex items-center justify-between mb-1">
+                <label className="block text-xs font-bold text-slate-700 dark:text-slate-300">
+                  Кому видна история
+                </label>
+                <button
+                  type="button"
+                  onClick={() => setIsGroupsModalOpen(true)}
+                  className="text-[11px] font-bold text-sky-500 hover:text-sky-600 transition flex items-center gap-1"
+                >
+                  <Plus size={12} /> Настроить группы
+                </button>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
                 <button
                   type="button"
                   onClick={() => {
                     haptics.tap();
                     setAudience('everyone');
                   }}
-                  className={`py-2 px-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1 border transition ${
+                  className={`py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 border transition ${
                     audience === 'everyone'
-                      ? 'bg-sky-500 text-white border-sky-500 shadow-sm'
-                      : 'bg-slate-100/80 dark:bg-slate-800/80 text-slate-600 dark:text-slate-300 border-transparent hover:bg-slate-200'
+                      ? 'bg-sky-500 text-white border-sky-500 shadow-xs'
+                      : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-transparent hover:bg-slate-200'
                   }`}
                 >
-                  <Globe size={13} />
-                  <span>Все</span>
+                  <Users size={14} />
+                  <span>Все подписчики</span>
                 </button>
 
                 <button
                   type="button"
                   onClick={() => {
                     haptics.tap();
-                    setAudience('close_friends');
+                    setAudience('groups');
                   }}
-                  className={`py-2 px-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1 border transition ${
-                    audience === 'close_friends'
-                      ? 'bg-emerald-500 text-white border-emerald-500 shadow-sm'
-                      : 'bg-slate-100/80 dark:bg-slate-800/80 text-slate-600 dark:text-slate-300 border-transparent hover:bg-slate-200'
+                  className={`py-2 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-1.5 border transition ${
+                    audience === 'groups'
+                      ? 'bg-indigo-500 text-white border-indigo-500 shadow-xs'
+                      : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border-transparent hover:bg-slate-200'
                   }`}
                 >
-                  <Users size={13} />
-                  <span>Близкие</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    haptics.tap();
-                    setAudience('contacts');
-                  }}
-                  className={`py-2 px-2 rounded-xl text-xs font-bold flex items-center justify-center gap-1 border transition ${
-                    audience === 'contacts'
-                      ? 'bg-purple-500 text-white border-purple-500 shadow-sm'
-                      : 'bg-slate-100/80 dark:bg-slate-800/80 text-slate-600 dark:text-slate-300 border-transparent hover:bg-slate-200'
-                  }`}
-                >
-                  <Lock size={13} />
-                  <span>Контакты</span>
+                  <UserCheck size={14} />
+                  <span>Выбранные группы</span>
                 </button>
               </div>
+
+              {/* Group Checkboxes when 'groups' selected */}
+              {audience === 'groups' && (
+                <div className="mt-2.5 p-3 rounded-2xl bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 space-y-2 animate-in fade-in duration-150">
+                  <div className="text-[11px] font-bold text-slate-500 dark:text-slate-400">
+                    Выберите группы для показа:
+                  </div>
+                  {followerGroups.length === 0 ? (
+                    <div className="text-center py-3 text-xs text-slate-400">
+                      У вас нет созданных групп.{' '}
+                      <button
+                        type="button"
+                        onClick={() => setIsGroupsModalOpen(true)}
+                        className="text-sky-500 font-bold underline"
+                      >
+                        Создать группу
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="space-y-1.5 max-h-36 overflow-y-auto no-scrollbar">
+                      {followerGroups.map((g) => {
+                        const isChecked = targetGroups.includes(g.id);
+                        return (
+                          <label
+                            key={g.id}
+                            className={`flex items-center justify-between p-2 rounded-xl text-xs font-semibold cursor-pointer transition select-none ${
+                              isChecked
+                                ? 'bg-sky-50 dark:bg-sky-950/40 text-sky-700 dark:text-sky-300 border border-sky-200 dark:border-sky-800'
+                                : 'hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300'
+                            }`}
+                          >
+                            <span className="flex items-center gap-2">
+                              <span>{g.name}</span>
+                              <span className="text-[10px] text-slate-400 font-normal">
+                                ({g.memberIds?.length || 0} уст.)
+                              </span>
+                            </span>
+                            <input
+                              type="checkbox"
+                              checked={isChecked}
+                              onChange={() => {
+                                haptics.tap();
+                                setTargetGroups((prev) =>
+                                  prev.includes(g.id) ? prev.filter((id) => id !== g.id) : [...prev, g.id]
+                                );
+                              }}
+                              className="h-4 w-4 rounded accent-sky-500 cursor-pointer"
+                            />
+                          </label>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
+
+            <FollowerGroupsModal
+              isOpen={isGroupsModalOpen}
+              onClose={() => setIsGroupsModalOpen(false)}
+              followersList={followersList}
+              onGroupsUpdated={(updated) => setFollowerGroups(updated)}
+            />
 
             {/* Toggles */}
             <div className="space-y-2 pt-2 border-t border-slate-200/60 dark:border-slate-800/60">

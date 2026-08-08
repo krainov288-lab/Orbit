@@ -14,7 +14,19 @@ const storage = multer.diskStorage({
   },
   filename: (req, file, cb) => {
     const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
-    const ext = path.extname(file.originalname) || '.png';
+    let ext = path.extname(file.originalname);
+    if (!ext || ext === '.') {
+      if (file.mimetype.includes('webm')) ext = '.webm';
+      else if (file.mimetype.includes('mp4')) ext = '.mp4';
+      else if (file.mimetype.includes('ogg')) ext = '.ogg';
+      else if (file.mimetype.includes('mpeg') || file.mimetype.includes('mp3')) ext = '.mp3';
+      else if (file.mimetype.includes('jpeg') || file.mimetype.includes('jpg')) ext = '.jpg';
+      else if (file.mimetype.includes('png')) ext = '.png';
+      else if (file.mimetype.includes('gif')) ext = '.gif';
+      else if (file.mimetype.includes('webp')) ext = '.webp';
+      else if (file.mimetype.includes('pdf')) ext = '.pdf';
+      else ext = '.bin';
+    }
     cb(null, `media-${uniqueSuffix}${ext}`);
   },
 });
@@ -38,13 +50,15 @@ export function uploadMediaHandler(req: Request, res: Response): void {
 
     const fileUrl = `/uploads/${req.file.filename}`;
     const isImage = req.file.mimetype.startsWith('image/');
+    const isAudio = req.file.mimetype.startsWith('audio/') || req.file.filename.endsWith('.webm') || req.file.filename.endsWith('.ogg');
+    const isVideo = req.file.mimetype.startsWith('video/') || req.file.filename.endsWith('.mp4');
 
     res.json({
       url: fileUrl,
       filename: req.file.originalname,
       size: req.file.size,
       mimeType: req.file.mimetype,
-      mediaType: isImage ? 'image' : 'file',
+      mediaType: isImage ? 'image' : isAudio ? 'audio' : isVideo ? 'video' : 'file',
     });
   });
 }

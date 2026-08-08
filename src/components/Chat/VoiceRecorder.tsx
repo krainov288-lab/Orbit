@@ -2,7 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Trash2, Send, Pause, Play, ChevronLeft } from 'lucide-react';
 
 interface VoiceRecorderProps {
-  onSendVoice: (durationSec: number, mediaUrl: string, blob?: Blob) => void;
+  onSendVoice: (durationSec: number, mediaUrl: string, blob?: Blob, waveformLevels?: number[]) => void;
   onCancel: () => void;
   isPushToTalk?: boolean;
   pushStartPos?: { x: number; y: number } | null;
@@ -237,7 +237,7 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
         const mimeType = recorder.mimeType || 'audio/webm';
         const blob = new Blob(chunksRef.current, { type: mimeType });
         const mediaUrl = blob.size > 0 ? URL.createObjectURL(blob) : '';
-        onSendVoice(dur, mediaUrl, blob.size > 0 ? blob : undefined);
+        onSendVoice(dur, mediaUrl, blob.size > 0 ? blob : undefined, waveformLevels);
       };
       recorder.stop();
     } else {
@@ -247,7 +247,7 @@ export const VoiceRecorder: React.FC<VoiceRecorderProps> = ({
         blob.size > 0
           ? URL.createObjectURL(blob)
           : 'https://actions.google.com/sounds/v1/ambiences/rain_heavy.ogg';
-      onSendVoice(dur, mediaUrl, blob.size > 0 ? blob : undefined);
+      onSendVoice(dur, mediaUrl, blob.size > 0 ? blob : undefined, waveformLevels);
     }
   };
 

@@ -1,5 +1,5 @@
 import React, { useRef, useState } from 'react';
-import { Play, Pause, CheckCheck, Minimize2 } from 'lucide-react';
+import { Play, Pause, Check, CheckCheck, Clock, Minimize2 } from 'lucide-react';
 import { Message } from '../../types';
 
 interface VideoCirclePlayerProps {
@@ -276,10 +276,19 @@ export const VideoCirclePlayer: React.FC<VideoCirclePlayerProps> = ({
         <div className="mt-1 flex items-center justify-center gap-1 text-[10px] text-slate-400 dark:text-slate-400 font-mono select-none">
           <span>{timestamp}</span>
           {isMe && (
-            <CheckCheck
-              size={12}
-              className={message.isRead ? 'text-sky-500 font-bold' : 'text-slate-400 dark:text-slate-500'}
-            />
+            message.pending ? (
+              <Clock size={11} className="text-slate-400 dark:text-slate-500 animate-pulse" title="Отправляется..." />
+            ) : (message.isRead || message.status === 'read') ? (
+              (typeof window !== 'undefined' && localStorage.getItem('orbit_hide_read_receipts') === 'true') ? (
+                <Check size={12} className="text-slate-400 dark:text-slate-500" title="Отправлено (статус скрыт)" />
+              ) : (
+                <CheckCheck size={12} className="text-sky-500 font-bold" title="Прочитано" />
+              )
+            ) : message.status === 'delivered' ? (
+              <CheckCheck size={12} className="text-slate-400 dark:text-slate-500" title="Доставлено" />
+            ) : (
+              <Check size={12} className="text-slate-400 dark:text-slate-500" title="Отправлено" />
+            )
           )}
         </div>
       )}

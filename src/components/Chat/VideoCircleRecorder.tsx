@@ -14,7 +14,15 @@ export const VideoCircleRecorder: React.FC<VideoCircleRecorderProps> = ({
   const [isPaused, setIsPaused] = useState(false);
   const [hasCamera, setHasCamera] = useState(true);
   const [bgLight, setBgLight] = useState<'dark' | 'white'>('dark');
-  const [quality, setQuality] = useState<'720p' | '180p'>('720p');
+  const [quality, setQuality] = useState<'1080p' | '720p' | '480p' | '360p'>('720p');
+  const [isProcessing, setIsProcessing] = useState(false);
+
+  const cycleQuality = () => {
+    if (quality === '1080p') setQuality('720p');
+    else if (quality === '720p') setQuality('480p');
+    else if (quality === '480p') setQuality('360p');
+    else setQuality('1080p');
+  };
   const [maskOverlay, setMaskOverlay] = useState(false);
 
   // Trimming State
@@ -68,7 +76,14 @@ export const VideoCircleRecorder: React.FC<VideoCircleRecorderProps> = ({
   useEffect(() => {
     chunksRef.current = [];
     setWaveform([]);
-    const videoConstraint = quality === '180p' ? { width: 180, height: 180 } : { width: 720, height: 720 };
+    const dimMap: Record<string, number> = {
+      '1080p': 1080,
+      '720p': 720,
+      '480p': 480,
+      '360p': 360,
+    };
+    const targetDim = dimMap[quality] || 720;
+    const videoConstraint = { width: { ideal: targetDim }, height: { ideal: targetDim } };
 
     navigator.mediaDevices
       ?.getUserMedia({ video: { facingMode: 'user', ...videoConstraint }, audio: true })
@@ -250,23 +265,22 @@ export const VideoCircleRecorder: React.FC<VideoCircleRecorderProps> = ({
     const finalDuration = Math.max(trimEnd - trimStart, 1);
     const recorder = mediaRecorderRef.current;
 
+    const finalizeAndSend = (rawBlob: Blob) => {
+      stopStream();
+      const mediaUrl = rawBlob.size > 0 ? URL.createObjectURL(rawBlob) : '';
+      onSendCircle(finalDuration, mediaUrl, rawBlob.size > 0 ? rawBlob : undefined);
+    };
+
     if (recorder && recorder.state !== 'inactive') {
       recorder.onstop = () => {
-        stopStream();
         const mimeType = recorder.mimeType || 'video/webm';
         const blob = new Blob(chunksRef.current, { type: mimeType });
-        const mediaUrl = blob.size > 0 ? URL.createObjectURL(blob) : '';
-        onSendCircle(finalDuration, mediaUrl, blob.size > 0 ? blob : undefined);
+        finalizeAndSend(blob);
       };
       recorder.stop();
     } else {
-      stopStream();
       const blob = new Blob(chunksRef.current, { type: 'video/webm' });
-      const mediaUrl =
-        blob.size > 0
-          ? URL.createObjectURL(blob)
-          : 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4';
-      onSendCircle(finalDuration, mediaUrl, blob.size > 0 ? blob : undefined);
+      finalizeAndSend(blob);
     }
   };
 
@@ -294,10 +308,11 @@ export const VideoCircleRecorder: React.FC<VideoCircleRecorderProps> = ({
               <Sun size={15} />
             </button>
             <button
-              onClick={() => setQuality(quality === '720p' ? '180p' : '720p')}
-              className="px-2.5 py-1 rounded-full text-[10px] font-bold bg-slate-800/30 hover:bg-slate-800/50 transition active:scale-95"
+              onClick={cycleQuality}
+              className="px-2.5 py-1 rounded-full text-[10px] font-bold bg-slate-800/30 hover:bg-slate-800/50 transition active:scale-95 flex items-center gap-1"
+              title="Качество видео"
             >
-              {quality}
+              <span>{quality}</span>
             </button>
             <button
               onClick={() => setMaskOverlay(!maskOverlay)}

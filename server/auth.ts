@@ -486,3 +486,46 @@ export function checkAvailabilityHandler(req: Request, res: Response): void {
     res.status(500).json({ error: 'Failed to check availability' });
   }
 }
+
+export function guestLoginHandler(req: Request, res: Response): void {
+  try {
+    const guestId = `usr_guest_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+    const guestNumber = Math.floor(1000 + Math.random() * 9000);
+    const guestUsername = `Гость #${guestNumber}`;
+    const guestHandle = `@guest_${guestNumber}_${Math.random().toString(36).substring(2, 5)}`;
+    const guestEmail = `guest_${guestId}@orbit.app`;
+
+    const gradients = [
+      'from-sky-300 to-cyan-200',
+      'from-sky-300 to-indigo-200',
+      'from-emerald-300 to-teal-200',
+      'from-violet-300 to-indigo-200',
+      'from-amber-300 to-orange-200',
+      'from-pink-300 to-rose-200',
+    ];
+    const avatarColor = gradients[Math.floor(Math.random() * gradients.length)];
+
+    const newUser: DBUser = {
+      id: guestId,
+      username: guestUsername,
+      email: guestEmail,
+      phone: `+7999${guestNumber}00`,
+      passwordHash: '',
+      avatarColor,
+      initials: 'Г',
+      handle: guestHandle,
+      balance: 100.00,
+      createdAt: new Date().toISOString(),
+      role: 'user',
+      isEmailVerified: true,
+    };
+
+    db.createUser(newUser);
+    const token = generateToken(newUser);
+    const { passwordHash: _, ...safeUser } = newUser;
+    safeUser.role = 'user';
+    res.json({ token, user: safeUser });
+  } catch (err: any) {
+    res.status(500).json({ error: 'Ошибка входа гостя' });
+  }
+}

@@ -1,4 +1,5 @@
 import { api } from '../services/api';
+import { compressImage } from '../services/media';
 
 /**
  * Checks if a given media URL or data URI is a video format
@@ -60,9 +61,18 @@ export const checkVideoDuration = (
  * Compress image or process video file for story slide upload
  */
 export const processMediaFileForStory = async (file: File): Promise<string> => {
+  let fileToUpload = file;
+  if (file.type.startsWith('image/')) {
+    try {
+      fileToUpload = await compressImage(file, 1080, 1920, 0.85);
+    } catch (e) {
+      console.error('Failed to compress story image:', e);
+    }
+  }
+
   // Try uploading via API first for local disk storage
   try {
-    const res = await api.uploadMedia(file);
+    const res = await api.uploadMedia(fileToUpload);
     if (res?.url) return res.url;
   } catch {
     // API upload failed, fallback to reader
@@ -107,6 +117,6 @@ export const processMediaFileForStory = async (file: File): Promise<string> => {
       img.src = e.target?.result as string;
     };
     reader.onerror = () => resolve('');
-    reader.readAsDataURL(file);
+    reader.readAsDataURL(fileToUpload);
   });
 };

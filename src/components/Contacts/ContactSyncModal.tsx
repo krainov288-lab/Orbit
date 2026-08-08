@@ -273,8 +273,7 @@ export const ContactSyncModal: React.FC<ContactSyncModalProps> = ({
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-md animate-fade-in text-primary">
       {/* Toast message */}
       {toastMessage && (
-        <div className="fixed top-5 left-1/2 -translate-x-1/2 z-60 px-4 py-2.5 rounded-full glass-card bg-blue-500/20 text-blue-500 text-xs font-medium shadow-2xl flex items-center gap-2 border border-blue-500/30">
-          <Check size={14} className="text-emerald-500" />
+        <div className="fixed top-5 left-1/2 -translate-x-1/2 z-60 px-4 py-2.5 rounded-2xl bg-white/80 dark:bg-slate-900/80 backdrop-blur-md border border-slate-200/50 dark:border-slate-800/50 text-slate-600 dark:text-slate-300 text-xs font-medium shadow-xl text-center whitespace-nowrap">
           <span>{toastMessage}</span>
         </div>
       )}
@@ -493,7 +492,11 @@ export const ContactSyncModal: React.FC<ContactSyncModalProps> = ({
 
                                 <div className="flex items-center gap-1.5">
                                   <button
-                                    onClick={() => {
+                                    onClick={async () => {
+                                      try {
+                                        await api.addContact(user.id);
+                                      } catch {}
+                                      if (onRefreshContacts) onRefreshContacts();
                                       onOpenChat({
                                         id: user.id,
                                         name: user.name,

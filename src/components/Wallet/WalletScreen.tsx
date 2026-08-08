@@ -3,6 +3,7 @@ import { ArrowUpRight, ArrowDownLeft, QrCode, Check, X } from 'lucide-react';
 import { Transaction, Contact, TabType } from '../../types';
 import { api } from '../../services/api';
 import { useLanguage } from '../../context/LanguageContext';
+import { WalletScreenSkeleton, Skeleton } from '../Common/Skeleton';
 
 interface WalletScreenProps {
   balance: number;
@@ -11,6 +12,7 @@ interface WalletScreenProps {
   setTab: (tab: TabType) => void;
   onRefreshBalance: () => void;
   isDark?: boolean;
+  isLoading?: boolean;
   isGuest?: boolean;
   onOpenAuth?: () => void;
 }
@@ -30,6 +32,7 @@ export const WalletScreen: React.FC<WalletScreenProps> = ({
   setTab,
   onRefreshBalance,
   isDark,
+  isLoading,
   isGuest,
   onOpenAuth,
 }) => {
@@ -39,6 +42,10 @@ export const WalletScreen: React.FC<WalletScreenProps> = ({
   const [amount, setAmount] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  if (isLoading && transactions.length === 0) {
+    return <WalletScreenSkeleton />;
+  }
 
   if (isGuest) {
     return (

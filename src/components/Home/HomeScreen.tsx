@@ -26,14 +26,18 @@ import {
   EyeOff,
   FolderKanban,
   UserPlus,
+  ArrowUpDown,
 } from 'lucide-react';
 import { Contact, NewsItem, TabType, SystemAnnouncement, Story, User, ChatFolder } from '../../types';
 import { api } from '../../services/api';
 import { socketService } from '../../services/socket';
+import { cacheService } from '../../services/cacheService';
 import { ContactSyncModal } from '../Contacts/ContactSyncModal';
 import { StoryViewer } from '../Feed/StoryViewer';
 import { StoryCreatorModal } from '../Feed/StoryCreatorModal';
+import { groupStoriesByUser } from '../../utils/storyGroups';
 import { useLanguage } from '../../context/LanguageContext';
+import { HomeScreenSkeleton, Skeleton, SkeletonAvatar } from '../Common/Skeleton';
 
 
 interface HomeScreenProps {
@@ -43,10 +47,13 @@ interface HomeScreenProps {
   openChat: (contact: Contact) => void;
   onAskAI?: (prompt?: string, actionLabel?: string) => void;
   isDark?: boolean;
+  isLoading?: boolean;
   onRefreshContacts?: () => void;
   currentUser?: User | null;
   onOpenUserProfile?: (userId: string) => void;
   onOpenAuth?: () => void;
+  isSearchOpen?: boolean;
+  onCloseSearch?: () => void;
 }
 
 const aiQuickActions = [
@@ -112,15 +119,51 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   setTab,
   openChat,
   onAskAI,
+  isDark,
+  isLoading,
   onRefreshContacts,
   currentUser,
   onOpenUserProfile,
   onOpenAuth,
+  isSearchOpen = false,
+  onCloseSearch,
 }) => {
   const [feedCollapsed, setFeedCollapsed] = useState(false);
   const [showSearchModal, setShowSearchModal] = useState(false);
   const [aiPrompt, setAiPrompt] = useState('');
   const [announcements, setAnnouncements] = useState<SystemAnnouncement[]>([]);
+  const [contactSortMode, setContactSortMode] = useState<'recent' | 'name' | 'online'>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem(`orbit_chat_sort_mode_${currentUser?.id || 'me'}`);
+      if (saved === 'recent' || saved === 'name' || saved === 'online') return saved;
+    }
+    return 'recent';
+  });
+
+  // Listen for sort mode changes from ProfileScreen settings
+  useEffect(() => {
+    const updateSortMode = () => {
+      if (typeof window !== 'undefined') {
+        const saved = localStorage.getItem(`orbit_chat_sort_mode_${currentUser?.id || 'me'}`);
+        if (saved === 'recent' || saved === 'name' || saved === 'online') {
+          setContactSortMode(saved);
+        }
+      }
+    };
+    window.addEventListener('storage', updateSortMode);
+    window.addEventListener('orbit_sort_mode_changed', updateSortMode);
+    updateSortMode();
+    return () => {
+      window.removeEventListener('storage', updateSortMode);
+      window.removeEventListener('orbit_sort_mode_changed', updateSortMode);
+    };
+  }, [currentUser?.id]);
+
+  const activeSearchModalState = isSearchOpen || showSearchModal;
+  const handleCloseSearchModal = () => {
+    setShowSearchModal(false);
+    if (onCloseSearch) onCloseSearch();
+  };
 
   // Folder Manager Modal State
   const [showFolderManagerModal, setShowFolderManagerModal] = useState(false);
@@ -134,18 +177,25 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   const [stories, setStories] = useState<Story[]>(() => {
     try {
       const cached = localStorage.getItem('orbit_stories_cache');
-      return cached ? JSON.parse(cached) : [];
+      if (!cached) return [];
+      const parsed: Story[] = JSON.parse(cached);
+      if (!Array.isArray(parsed)) return [];
+      const unique = Array.from(new Map(parsed.map((s) => [s.id, s])).values());
+      return unique;
     } catch {
       return [];
     }
   });
   const [activeStory, setActiveStory] = useState<Story | null>(null);
+  const userStoryGroups = React.useMemo(() => groupStoriesByUser(stories), [stories]);
   const [showAddStoryModal, setShowAddStoryModal] = useState(false);
   const [storyImageUrl, setStoryImageUrl] = useState('');
   const [storyCaption, setStoryCaption] = useState('');
 
   // Channels & Groups State
-  const [channelsGroups, setChannelsGroups] = useState<any[]>([]);
+  const [channelsGroups, setChannelsGroups] = useState<any[]>(() => {
+    return cacheService.getSync<any[]>('channels_groups') || [];
+  });
   const [showCreateCGModal, setShowCreateCGModal] = useState(false);
   const [cgType, setCgType] = useState<'public_channel' | 'private_channel' | 'public_group' | 'private_group' | 'closed_group'>('public_channel');
   const [cgTitle, setCgTitle] = useState('');
@@ -160,16 +210,21 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
       if (Array.isArray(list)) {
         const unique = Array.from(new Map(list.map((item) => [item.id, item])).values());
         setChannelsGroups(unique);
+        cacheService.set('channels_groups', unique);
       }
-    } catch {}
+    } catch {
+      const cached = cacheService.getSync<any[]>('channels_groups');
+      if (cached) setChannelsGroups(cached);
+    }
   };
 
   const loadStories = async () => {
     try {
       const list = await api.getStories();
       if (Array.isArray(list)) {
-        setStories(list);
-        localStorage.setItem('orbit_stories_cache', JSON.stringify(list));
+        const unique = Array.from(new Map(list.map((s) => [s.id, s])).values());
+        setStories(unique);
+        cacheService.setCachedStories(unique);
       }
     } catch {}
   };
@@ -183,7 +238,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
         setStories((prev) => {
           const exists = prev.some((s) => s.id === data.story.id);
           const next = exists ? prev.map((s) => (s.id === data.story.id ? data.story : s)) : [data.story, ...prev];
-          localStorage.setItem('orbit_stories_cache', JSON.stringify(next));
+          cacheService.setCachedStories(next);
           return next;
         });
       }
@@ -193,7 +248,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
       if (data.story) {
         setStories((prev) => {
           const next = prev.map((s) => (s.id === data.story.id ? { ...s, ...data.story } : s));
-          localStorage.setItem('orbit_stories_cache', JSON.stringify(next));
+          cacheService.setCachedStories(next);
           return next;
         });
       }
@@ -203,7 +258,40 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
       if (data.storyId) {
         setStories((prev) => {
           const next = prev.filter((s) => s.id !== data.storyId);
-          localStorage.setItem('orbit_stories_cache', JSON.stringify(next));
+          cacheService.setCachedStories(next);
+          return next;
+        });
+      }
+    });
+
+    const unsubCgCreated = socketService.subscribe('channel_group_created', (data) => {
+      if (data.channelGroup) {
+        setChannelsGroups((prev) => {
+          const exists = prev.some((cg) => cg.id === data.channelGroup.id);
+          const next = exists
+            ? prev.map((cg) => (cg.id === data.channelGroup.id ? { ...cg, ...data.channelGroup } : cg))
+            : [data.channelGroup, ...prev];
+          cacheService.set('channels_groups', next);
+          return next;
+        });
+      }
+    });
+
+    const unsubCgUpdated = socketService.subscribe('channel_group_updated', (data) => {
+      if (data.channelGroup) {
+        setChannelsGroups((prev) => {
+          const next = prev.map((cg) => (cg.id === data.channelGroup.id ? { ...cg, ...data.channelGroup } : cg));
+          cacheService.set('channels_groups', next);
+          return next;
+        });
+      }
+    });
+
+    const unsubCgDeleted = socketService.subscribe('channel_group_deleted', (data) => {
+      if (data.id) {
+        setChannelsGroups((prev) => {
+          const next = prev.filter((cg) => cg.id !== data.id);
+          cacheService.set('channels_groups', next);
           return next;
         });
       }
@@ -213,6 +301,9 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
       unsubNewStory();
       unsubStoryUpdated();
       unsubStoryDeleted();
+      unsubCgCreated();
+      unsubCgUpdated();
+      unsubCgDeleted();
     };
   }, []);
 
@@ -671,7 +762,24 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
   const sortedContacts = [...displayedContacts].sort((a, b) => {
     const aPinned = pinnedContactIds.includes(a.id) ? 1 : 0;
     const bPinned = pinnedContactIds.includes(b.id) ? 1 : 0;
-    return bPinned - aPinned;
+    if (aPinned !== bPinned) return bPinned - aPinned;
+
+    if (contactSortMode === 'name') {
+      return a.name.localeCompare(b.name, 'ru');
+    }
+
+    if (contactSortMode === 'online') {
+      if (a.isOnline === b.isOnline) {
+        return a.name.localeCompare(b.name, 'ru');
+      }
+      return b.isOnline ? -1 : 1;
+    }
+
+    // Default 'recent' (time of last message)
+    if (a.time && b.time) {
+      return b.time.localeCompare(a.time);
+    }
+    return 0;
   });
 
   // Long touch handler
@@ -836,7 +944,7 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
       <div className="flex-1 min-h-0 flex flex-col relative">
         {/* Categorize Toast Notification */}
         {categorizeToast && (
-          <div className="absolute -top-9 left-1/2 -translate-x-1/2 z-30 px-3.5 py-1.5 rounded-full bg-slate-900/90 dark:bg-white/95 text-white dark:text-slate-900 text-xs font-semibold shadow-xl border border-white/20 dark:border-slate-800 animate-fade-in whitespace-nowrap">
+          <div className="absolute -top-10 left-1/2 -translate-x-1/2 z-30 px-4 py-2 rounded-2xl bg-white/85 dark:bg-slate-900/85 backdrop-blur-xl border border-slate-200/80 dark:border-slate-800/80 shadow-xl text-slate-600 dark:text-slate-300 text-xs font-medium tracking-tight animate-fade-in whitespace-nowrap pointer-events-none">
             {categorizeToast}
           </div>
         )}
@@ -909,17 +1017,6 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
                 </div>
               ))}
             </div>
-
-            {/* Buttons inline on the right */}
-            <div className="flex items-center gap-1.5 shrink-0 z-10">
-              <button
-                onClick={() => setShowSearchModal(true)}
-                className="h-8 w-8 rounded-full bg-white dark:bg-slate-800 text-slate-800 dark:text-white border border-slate-200/80 dark:border-slate-700/80 flex items-center justify-center shrink-0 shadow-sm hover:bg-slate-50 dark:hover:bg-slate-700 active:scale-95 transition"
-                title="Контакты, группы, каналы"
-              >
-                <Plus size={16} />
-              </button>
-            </div>
           </div>
         )}
 
@@ -987,8 +1084,6 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
               )}
             </div>
           )}
-
-          {/* Pull handle / button */}
           <div
             onClick={() => setIsPullSearchOpen(!isPullSearchOpen)}
             className="w-full flex items-center justify-center py-1 mb-1 cursor-pointer hover:bg-slate-200/30 dark:hover:bg-slate-800/30 rounded-xl transition text-[10px] text-slate-400 font-medium gap-1.5 group"
@@ -1009,6 +1104,24 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
               >
                 Войти в аккаунт
               </button>
+            </div>
+          ) : isLoading && sortedContacts.length === 0 ? (
+            <div className="space-y-2 p-2 w-full animate-fade-in">
+              {[1, 2, 3, 4, 5].map((i) => (
+                <div key={i} className="flex items-center justify-between p-3 rounded-2xl bg-white/40 dark:bg-slate-800/40 border border-slate-100 dark:border-slate-800/50">
+                  <div className="flex items-center gap-3 flex-1 min-w-0">
+                    <SkeletonAvatar size="md" />
+                    <div className="space-y-2 flex-1 min-w-0">
+                      <Skeleton className="h-3.5 w-2/5 rounded-md" />
+                      <Skeleton className="h-3 w-4/5 rounded-md" />
+                    </div>
+                  </div>
+                  <div className="flex flex-col items-end gap-1.5 ml-2">
+                    <Skeleton className="h-2.5 w-8 rounded-md" />
+                    <Skeleton className="h-4 w-4 rounded-full" />
+                  </div>
+                </div>
+              ))}
             </div>
           ) : sortedContacts.length === 0 ? (
             <div className="text-center text-xs text-muted p-6 my-auto flex flex-col items-center justify-center gap-2 self-center w-full">
@@ -1394,7 +1507,12 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
         onClose={() => setShowAddStoryModal(false)}
         currentUser={currentUser}
         onStoryCreated={(newStory) => {
-          setStories((prev) => [newStory, ...prev]);
+          setStories((prev) => {
+            const filtered = prev.filter((s) => s.id !== newStory.id);
+            const next = [newStory, ...filtered];
+            cacheService.setCachedStories(next);
+            return next;
+          });
         }}
       />
 
@@ -1402,13 +1520,23 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
       {activeStory && (
         <StoryViewer
           story={activeStory}
+          storyGroups={userStoryGroups}
+          initialGroupIndex={userStoryGroups.findIndex((g) => g.stories.some((s) => s.id === activeStory.id))}
           currentUser={currentUser}
           onClose={() => setActiveStory(null)}
           onDeleteStory={(deletedId) => {
-            setStories((prev) => prev.filter((s) => s.id !== deletedId));
+            setStories((prev) => {
+              const next = prev.filter((s) => s.id !== deletedId);
+              cacheService.setCachedStories(next);
+              return next;
+            });
           }}
           onUpdateStory={(updated) => {
-            setStories((prev) => prev.map((s) => (s.id === updated.id ? updated : s)));
+            setStories((prev) => {
+              const next = prev.map((s) => (s.id === updated.id ? updated : s));
+              cacheService.setCachedStories(next);
+              return next;
+            });
           }}
         />
       )}
@@ -1762,9 +1890,12 @@ export const HomeScreen: React.FC<HomeScreenProps> = ({
 
       {/* Full Production Contact Sync Modal */}
       <ContactSyncModal
-        isOpen={showSearchModal}
-        onClose={() => setShowSearchModal(false)}
-        onOpenChat={(contact) => openChat(contact)}
+        isOpen={activeSearchModalState}
+        onClose={handleCloseSearchModal}
+        onOpenChat={(contact) => {
+          handleCloseSearchModal();
+          openChat(contact);
+        }}
         onRefreshContacts={onRefreshContacts}
         onCreateChannelGroup={() => setShowCreateCGModal(true)}
       />

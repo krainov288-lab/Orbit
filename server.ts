@@ -8,6 +8,7 @@ import {
   authenticateToken,
   registerHandler,
   loginHandler,
+  guestLoginHandler,
   getCurrentUserHandler,
   checkAvailabilityHandler,
   requestPasswordResetHandler,
@@ -19,6 +20,12 @@ import {
 import { realtimeServer } from './server/websocket.js';
 import { aiChatHandler } from './server/ai.js';
 import { uploadMediaHandler } from './server/media.js';
+import {
+  globalDdosProtection,
+  clickSpamProtection,
+  reactionAntiCheat,
+  securityManager,
+} from './server/security.js';
 
 async function startServer() {
   const app = express();
@@ -27,6 +34,10 @@ async function startServer() {
 
   app.use(express.json({ limit: '50mb' }));
   app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+  // Global DDoS and Click-Spam Security Protection Middlewares
+  app.use('/api', globalDdosProtection);
+  app.use('/api', clickSpamProtection);
 
   // Serve static uploads
   const uploadsPath = path.join(process.cwd(), 'uploads');
@@ -42,6 +53,7 @@ async function startServer() {
   // Authentication
   app.post('/api/auth/register', registerHandler);
   app.post('/api/auth/login', loginHandler);
+  app.post('/api/auth/guest', guestLoginHandler);
   app.get('/api/auth/me', authenticateToken, getCurrentUserHandler);
   app.post('/api/auth/check-availability', checkAvailabilityHandler);
   app.post('/api/auth/request-password-reset', requestPasswordResetHandler);
@@ -568,6 +580,13 @@ async function startServer() {
       text: m.text,
       mediaUrl: m.mediaUrl,
       mediaType: m.mediaType,
+      duration: m.duration,
+      waveform: m.waveform,
+      fileName: m.fileName,
+      fileSize: m.fileSize,
+      isEncrypted: m.isEncrypted,
+      replyTo: m.replyTo,
+      authorName: m.authorName,
       amount: m.amount,
       tx: m.isTx,
       timestamp: m.timestamp,
@@ -580,6 +599,7 @@ async function startServer() {
     const currentUserId = req.user!.id;
     const { contactId } = req.params;
     const limit = parseInt(req.query.limit as string) || 20;
+    const isHideRead = req.headers['x-hide-read-receipts'] === 'true' || req.query.hideRead === 'true';
 
     const channelGroup = db.getChannelGroupById(contactId);
     let messages: DBMessage[] = [];
@@ -587,11 +607,13 @@ async function startServer() {
       messages = db.getMessagesForChannelGroup(contactId, limit);
     } else {
       messages = db.getMessagesBetween(currentUserId, contactId, limit);
-      db.markMessagesAsRead(contactId, currentUserId);
-      realtimeServer.sendToUser(contactId, {
-        type: 'messages_read',
-        byUserId: currentUserId,
-      });
+      if (!isHideRead) {
+        db.markMessagesAsRead(contactId, currentUserId);
+        realtimeServer.sendToUser(contactId, {
+          type: 'messages_read',
+          byUserId: currentUserId,
+        });
+      }
     }
 
     const formattedMessages = messages.map((m) => formatMessageForUser(m, currentUserId));
@@ -627,18 +649,39 @@ async function startServer() {
   app.post('/api/messages/:contactId/read', authenticateToken, (req: AuthenticatedRequest, res) => {
     const currentUserId = req.user!.id;
     const { contactId } = req.params;
+    const isHideRead = req.headers['x-hide-read-receipts'] === 'true' || req.query.hideRead === 'true';
 
-    db.markMessagesAsRead(contactId, currentUserId);
+    if (!isHideRead) {
+      db.markMessagesAsRead(contactId, currentUserId);
 
-    realtimeServer.sendToUser(contactId, {
-      type: 'messages_read',
-      byUserId: currentUserId,
-    });
+      realtimeServer.sendToUser(contactId, {
+        type: 'messages_read',
+        byUserId: currentUserId,
+      });
+    }
 
     res.json({ success: true });
   });
 
-  app.post('/api/messages/:contactId/reaction', authenticateToken, (req: AuthenticatedRequest, res) => {
+  app.post('/api/messages/read/:messageId', authenticateToken, (req: AuthenticatedRequest, res) => {
+    const currentUserId = req.user!.id;
+    const { messageId } = req.params;
+    const isHideRead = req.headers['x-hide-read-receipts'] === 'true' || req.query.hideRead === 'true';
+
+    if (!isHideRead) {
+      db.markSingleMessageAsRead(messageId);
+
+      realtimeServer.broadcast({
+        type: 'message_read_single',
+        messageId,
+        byUserId: currentUserId,
+      });
+    }
+
+    res.json({ success: true });
+  });
+
+  app.post('/api/messages/:contactId/reaction', authenticateToken, reactionAntiCheat, (req: AuthenticatedRequest, res) => {
     const currentUserId = req.user!.id;
     const { contactId } = req.params;
     const { messageId, emoji } = req.body;
@@ -679,7 +722,14 @@ async function startServer() {
     const currentUserId = req.user!.id;
     const currentUser = db.getUserById(currentUserId);
     const { contactId } = req.params;
-    const { text, mediaUrl, mediaType, amount, tx } = req.body;
+    const { text, mediaUrl, mediaType, duration, waveform, fileName, fileSize, isEncrypted, replyTo, authorName, amount, tx } = req.body;
+
+    // Server-side anti-spam check
+    const spamCheck = securityManager.checkMessageSpam(currentUserId, text || '');
+    if (spamCheck.isSpam) {
+      res.status(429).json({ error: spamCheck.error });
+      return;
+    }
 
     const recipient = db.getUserById(contactId);
     const channelGroup = db.getChannelGroupById(contactId);
@@ -714,6 +764,13 @@ async function startServer() {
       text: text || '',
       mediaUrl,
       mediaType,
+      duration: typeof duration === 'number' ? duration : undefined,
+      waveform: Array.isArray(waveform) ? waveform : undefined,
+      fileName,
+      fileSize,
+      isEncrypted: !!isEncrypted,
+      replyTo,
+      authorName,
       amount,
       isTx: !!tx,
       timestamp: Date.now(),
@@ -728,6 +785,13 @@ async function startServer() {
       text: newMessage.text,
       mediaUrl: newMessage.mediaUrl,
       mediaType: newMessage.mediaType,
+      duration: newMessage.duration,
+      waveform: newMessage.waveform,
+      fileName: newMessage.fileName,
+      fileSize: newMessage.fileSize,
+      isEncrypted: newMessage.isEncrypted,
+      replyTo: newMessage.replyTo,
+      authorName: newMessage.authorName,
       amount: newMessage.amount,
       tx: newMessage.isTx,
       timestamp: newMessage.timestamp,
@@ -748,6 +812,13 @@ async function startServer() {
           text: newMessage.text,
           mediaUrl: newMessage.mediaUrl,
           mediaType: newMessage.mediaType,
+          duration: newMessage.duration,
+          waveform: newMessage.waveform,
+          fileName: newMessage.fileName,
+          fileSize: newMessage.fileSize,
+          isEncrypted: newMessage.isEncrypted,
+          replyTo: newMessage.replyTo,
+          authorName: newMessage.authorName,
           amount: newMessage.amount,
           tx: newMessage.isTx,
           timestamp: newMessage.timestamp,
@@ -767,7 +838,7 @@ async function startServer() {
           authorHandle: channelGroup.handle || `@channel_${channelGroup.id}`,
           authorAvatar: channelGroup.avatarUrl,
           tag: 'КАНАЛ',
-          title: (text || 'Публикация канала').substring(0, 60),
+          title: '',
           content: text || '',
           mediaUrl,
           mediaType: mediaType === 'video_circle' || mediaType === 'video' ? 'video' : 'image',
@@ -793,6 +864,13 @@ async function startServer() {
           text: newMessage.text,
           mediaUrl: newMessage.mediaUrl,
           mediaType: newMessage.mediaType,
+          duration: newMessage.duration,
+          waveform: newMessage.waveform,
+          fileName: newMessage.fileName,
+          fileSize: newMessage.fileSize,
+          isEncrypted: newMessage.isEncrypted,
+          replyTo: newMessage.replyTo,
+          authorName: newMessage.authorName,
           amount: newMessage.amount,
           tx: newMessage.isTx,
           timestamp: newMessage.timestamp,
@@ -809,6 +887,7 @@ async function startServer() {
         body: text || (mediaType ? `Sent an ${mediaType}` : 'Sent a message'),
         timestamp: Date.now(),
         isRead: false,
+        senderId: currentUserId,
       };
       db.addNotification(notif);
 
@@ -969,28 +1048,55 @@ async function startServer() {
     }
 
     const rawNews = db.getNews();
-    const formatted = rawNews.map((n) => {
-      const u = n.userId ? db.getUserById(n.userId) : null;
-      return {
-        id: n.id,
-        userId: n.userId,
-        authorName: n.authorName || (u ? u.username : 'ORBIT News'),
-        authorHandle: n.authorHandle || (u ? u.handle : '@orbit'),
-        authorAvatar: n.authorAvatar || u?.avatarUrl,
-        tag: n.tag || 'NEW',
-        title: n.title,
-        timestamp: n.timestamp,
-        accent: n.accent || 'from-sky-500 to-indigo-500',
-        content: n.content,
-        mediaUrl: n.mediaUrl,
-        mediaType: n.mediaType || 'image',
-        likesCount: (n.likes || []).length,
-        userLiked: currentUserId ? (n.likes || []).includes(currentUserId) : false,
-        commentsCount: (n.comments || []).length,
-        comments: n.comments || [],
-        sharesCount: n.sharesCount || 0,
-      };
-    });
+    const formatted = rawNews
+      .filter((n) => {
+        // System news (e.g. no userId or official admin) -> visible to everyone
+        if (!n.userId) return true;
+        const authorUser = db.getUserById(n.userId);
+        if (authorUser && (authorUser.role === 'admin' || authorUser.role === 'sysadmin')) return true;
+
+        // Author sees own news
+        if (currentUserId && n.userId === currentUserId) return true;
+
+        // Must be follower of author to see author's posts
+        const isFollower = currentUserId ? (authorUser?.followers || []).includes(currentUserId) : false;
+        if (!isFollower) return false;
+
+        // Check target groups
+        if (n.targetGroups && n.targetGroups.length > 0 && n.audience === 'groups') {
+          if (!currentUserId || !authorUser?.followerGroups) return false;
+          const isInTargetGroup = authorUser.followerGroups.some(
+            (g) => n.targetGroups!.includes(g.id) && (g.memberIds || []).includes(currentUserId!)
+          );
+          return isInTargetGroup;
+        }
+
+        return true;
+      })
+      .map((n) => {
+        const u = n.userId ? db.getUserById(n.userId) : null;
+        return {
+          id: n.id,
+          userId: n.userId,
+          authorName: n.authorName || (u ? u.username : 'ORBIT News'),
+          authorHandle: n.authorHandle || (u ? u.handle : '@orbit'),
+          authorAvatar: n.authorAvatar || u?.avatarUrl,
+          tag: n.tag || 'NEW',
+          title: n.title,
+          timestamp: n.timestamp,
+          accent: n.accent || 'from-sky-500 to-indigo-500',
+          content: n.content,
+          mediaUrl: n.mediaUrl,
+          mediaType: n.mediaType || 'image',
+          likesCount: (n.likes || []).length,
+          userLiked: currentUserId ? (n.likes || []).includes(currentUserId) : false,
+          commentsCount: (n.comments || []).length,
+          comments: n.comments || [],
+          sharesCount: n.sharesCount || 0,
+          audience: n.audience || 'everyone',
+          targetGroups: n.targetGroups || [],
+        };
+      });
 
     res.json(formatted);
   });
@@ -998,7 +1104,7 @@ async function startServer() {
   app.post('/api/news', authenticateToken, (req: AuthenticatedRequest, res) => {
     const currentUserId = req.user!.id;
     const user = db.getUserById(currentUserId);
-    const { title, content, tag, accent, mediaUrl, mediaType } = req.body;
+    const { title, content, tag, accent, mediaUrl, mediaType, audience, targetGroups } = req.body;
 
     const rawTitle = (title || '').trim();
     const rawContent = (content || '').trim();
@@ -1008,8 +1114,8 @@ async function startServer() {
       return;
     }
 
-    const finalTitle = rawTitle || (rawContent.length > 50 ? rawContent.substring(0, 50) + '...' : rawContent);
-    const finalContent = rawContent || rawTitle;
+    const finalTitle = rawTitle;
+    const finalContent = rawContent;
 
     const newsItem: any = {
       id: `news_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
@@ -1027,6 +1133,8 @@ async function startServer() {
       likes: [],
       comments: [],
       sharesCount: 0,
+      audience: audience || 'everyone',
+      targetGroups: Array.isArray(targetGroups) ? targetGroups : [],
     };
 
     db.addNews(newsItem);
@@ -1116,7 +1224,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/news/:id/like', authenticateToken, (req: AuthenticatedRequest, res) => {
+  app.post('/api/news/:id/like', authenticateToken, reactionAntiCheat, (req: AuthenticatedRequest, res) => {
     const currentUserId = req.user!.id;
     const result = db.toggleNewsLike(req.params.id, currentUserId);
     if (result) {
@@ -1231,6 +1339,10 @@ async function startServer() {
     };
 
     db.addChannelGroup(newGroupChannel);
+    realtimeServer.broadcast({
+      type: 'channel_group_created',
+      channelGroup: newGroupChannel,
+    });
     res.status(201).json(newGroupChannel);
   });
 
@@ -1308,7 +1420,7 @@ async function startServer() {
       return;
     }
 
-    const { title, description, handle, type, allowCalls, slowMode, signPosts, avatarUrl, avatarColor, allowedReactions, disableReactions, disableComments, disableForwarding } = req.body;
+    const { title, description, handle, type, allowCalls, slowMode, signPosts, avatarUrl, avatarColor, allowedReactions, disableReactions, disableComments, disableForwarding, bgPattern, bgOpacity, bgAdaptTheme, bgImageUrl } = req.body;
     const updates: any = {};
 
     if (title) updates.title = title.trim();
@@ -1327,6 +1439,10 @@ async function startServer() {
     if (disableReactions !== undefined) updates.disableReactions = disableReactions;
     if (disableComments !== undefined) updates.disableComments = disableComments;
     if (disableForwarding !== undefined) updates.disableForwarding = disableForwarding;
+    if (bgPattern !== undefined) updates.bgPattern = bgPattern;
+    if (bgOpacity !== undefined) updates.bgOpacity = bgOpacity;
+    if (bgAdaptTheme !== undefined) updates.bgAdaptTheme = bgAdaptTheme;
+    if (bgImageUrl !== undefined) updates.bgImageUrl = bgImageUrl;
 
     const updated = db.updateChannelGroup(req.params.id, updates);
     realtimeServer.broadcast({ type: 'channel_group_updated', channelGroup: updated });
@@ -1437,6 +1553,72 @@ async function startServer() {
     } else {
       res.status(404).json({ error: 'Канал или группа не найдена' });
     }
+  });
+
+  app.post('/api/channels-groups/:id/invite', authenticateToken, (req: AuthenticatedRequest, res) => {
+    const currentUserId = req.user!.id;
+    const inviter = db.getUserById(currentUserId);
+    const cg = db.getChannelGroupById(req.params.id);
+    if (!cg) {
+      res.status(404).json({ error: 'Канал или группа не найдена' });
+      return;
+    }
+
+    const isCreator = cg.creatorId === currentUserId;
+    const isAdmin = (cg.adminIds || []).includes(currentUserId);
+    const isModerator = (cg.moderatorIds || []).includes(currentUserId);
+
+    if (!isCreator && !isAdmin && !isModerator) {
+      res.status(403).json({ error: 'У вас нет прав для приглашения участников' });
+      return;
+    }
+
+    const { targetUserId, search } = req.body;
+    let targetUser = targetUserId ? db.getUserById(targetUserId) : null;
+
+    if (!targetUser && search) {
+      const cleanSearch = search.trim().toLowerCase();
+      const allUsers = db.getUsers();
+      targetUser = allUsers.find(
+        (u) =>
+          u.id === cleanSearch ||
+          u.username.toLowerCase().includes(cleanSearch) ||
+          u.handle.toLowerCase().includes(cleanSearch) ||
+          (u.phone && u.phone.includes(cleanSearch))
+      ) || null;
+    }
+
+    if (!targetUser) {
+      res.status(404).json({ error: 'Пользователь не найден' });
+      return;
+    }
+
+    // Join the user to channel/group automatically
+    db.joinChannelGroup(cg.id, targetUser.id);
+
+    // Save invitation record
+    if (!cg.invitations) cg.invitations = {};
+    const inviterName = inviter ? inviter.username : 'Пользователь';
+    cg.invitations[targetUser.id] = {
+      inviterId: currentUserId,
+      inviterName,
+      timestamp: Date.now(),
+    };
+    db.updateChannelGroup(cg.id, { invitations: cg.invitations });
+
+    const updated = db.getChannelGroupById(cg.id);
+    realtimeServer.broadcast({ type: 'channel_group_updated', channelGroup: updated });
+
+    res.json({
+      success: true,
+      message: `Пользователь ${targetUser.username} успешно добавлен в ${cg.type.includes('channel') ? 'канал' : 'группу'}`,
+      channelGroup: updated,
+      user: {
+        id: targetUser.id,
+        username: targetUser.username,
+        handle: targetUser.handle,
+      },
+    });
   });
 
   app.post('/api/channels-groups/:id/leave', authenticateToken, (req: AuthenticatedRequest, res) => {
@@ -1686,20 +1868,69 @@ async function startServer() {
     });
   });
 
+  // Follower Groups API
+  app.get('/api/follower-groups', authenticateToken, (req: AuthenticatedRequest, res) => {
+    const user = db.getUserById(req.user!.id);
+    res.json(user?.followerGroups || []);
+  });
+
+  app.post('/api/follower-groups', authenticateToken, (req: AuthenticatedRequest, res) => {
+    const user = db.getUserById(req.user!.id);
+    if (!user) return res.status(404).json({ error: 'Пользователь не найден' });
+    const { name, memberIds } = req.body;
+    if (!name || !name.trim()) return res.status(400).json({ error: 'Укажите название группы' });
+
+    if (!user.followerGroups) user.followerGroups = [];
+    const group = {
+      id: `fg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+      name: name.trim(),
+      memberIds: Array.isArray(memberIds) ? memberIds : [],
+    };
+    user.followerGroups.push(group);
+    db.updateUserProfile(user.id, { followerGroups: user.followerGroups });
+    res.json({ success: true, group });
+  });
+
+  app.put('/api/follower-groups/:id', authenticateToken, (req: AuthenticatedRequest, res) => {
+    const user = db.getUserById(req.user!.id);
+    if (!user) return res.status(404).json({ error: 'Пользователь не найден' });
+    const groupId = req.params.id;
+    const { name, memberIds } = req.body;
+
+    if (!user.followerGroups) user.followerGroups = [];
+    const idx = user.followerGroups.findIndex((g) => g.id === groupId);
+    if (idx === -1) return res.status(404).json({ error: 'Группа не найдена' });
+
+    if (name) user.followerGroups[idx].name = name.trim();
+    if (Array.isArray(memberIds)) user.followerGroups[idx].memberIds = memberIds;
+
+    db.updateUserProfile(user.id, { followerGroups: user.followerGroups });
+    res.json({ success: true, group: user.followerGroups[idx] });
+  });
+
+  app.delete('/api/follower-groups/:id', authenticateToken, (req: AuthenticatedRequest, res) => {
+    const user = db.getUserById(req.user!.id);
+    if (!user) return res.status(404).json({ error: 'Пользователь не найден' });
+    const groupId = req.params.id;
+
+    if (user.followerGroups) {
+      user.followerGroups = user.followerGroups.filter((g) => g.id !== groupId);
+      db.updateUserProfile(user.id, { followerGroups: user.followerGroups });
+    }
+    res.json({ success: true });
+  });
+
   // Stories API
   app.get('/api/stories', (req, res) => {
     const authHeader = req.headers['authorization'];
     const token = authHeader && authHeader.split(' ')[1];
     let currentUserId: string | null = null;
-    let following: string[] = [];
 
     if (token) {
       try {
         const decoded = jwt.verify(token, JWT_SECRET) as any;
         if (decoded?.id) {
           currentUserId = decoded.id;
-          const u = db.getUserById(currentUserId);
-          if (u?.following) following = u.following;
         }
       } catch {}
     }
@@ -1707,13 +1938,28 @@ async function startServer() {
     const allStories = db.getStories();
     const allowedStories = allStories
       .filter((s) => {
-        if (!currentUserId) return s.audience === 'everyone' || !s.audience;
-        return (
-          s.userId === currentUserId ||
-          following.includes(s.userId) ||
-          s.audience === 'everyone' ||
-          !s.audience
-        );
+        // Author always sees own story
+        if (currentUserId && s.userId === currentUserId) return true;
+
+        const authorUser = db.getUserById(s.userId);
+        if (!authorUser) return false;
+
+        // Is current user following the story author?
+        const isFollower = currentUserId ? (authorUser.followers || []).includes(currentUserId) : false;
+
+        // User posts are only visible to followers!
+        if (!isFollower) return false;
+
+        // Check if targeted to specific follower groups
+        if (s.targetGroups && s.targetGroups.length > 0 && (s.audience === 'groups' || (s.audience as string) === 'close_friends')) {
+          if (!currentUserId || !authorUser.followerGroups) return false;
+          const isInGroup = authorUser.followerGroups.some(
+            (g) => s.targetGroups!.includes(g.id) && (g.memberIds || []).includes(currentUserId!)
+          );
+          return isInGroup;
+        }
+
+        return true;
       })
       .map((s) => {
         const u = db.getUserById(s.userId);
@@ -1730,6 +1976,7 @@ async function startServer() {
           timestamp: s.timestamp,
           viewed: currentUserId ? (s.viewedBy || []).includes(currentUserId) : false,
           audience: s.audience || 'everyone',
+          targetGroups: s.targetGroups || [],
           hideComments: !!s.hideComments,
           hideReactions: !!s.hideReactions,
           allowedReactions: s.allowedReactions || ['❤️', '🔥', '👏', '😍', '😂', '😮'],
@@ -1743,7 +1990,7 @@ async function startServer() {
 
   app.post('/api/stories', authenticateToken, (req: AuthenticatedRequest, res) => {
     const currentUserId = req.user!.id;
-    const { mediaUrl, slides, caption, audience, hideComments, hideReactions, allowedReactions } = req.body;
+    const { mediaUrl, slides, caption, audience, targetGroups, hideComments, hideReactions, allowedReactions } = req.body;
     if (!mediaUrl && (!slides || slides.length === 0)) {
       res.status(400).json({ error: 'Укажите изображение или слайды для истории' });
       return;
@@ -1760,6 +2007,7 @@ async function startServer() {
       timestamp: Date.now(),
       viewedBy: [currentUserId],
       audience: audience || 'everyone',
+      targetGroups: Array.isArray(targetGroups) ? targetGroups : [],
       hideComments: !!hideComments,
       hideReactions: !!hideReactions,
       allowedReactions: allowedReactions || ['❤️', '🔥', '👏', '😍', '😂', '😮'],
@@ -1786,6 +2034,7 @@ async function startServer() {
       timestamp: story.timestamp,
       viewed: true,
       audience: story.audience,
+      targetGroups: story.targetGroups,
       hideComments: story.hideComments,
       hideReactions: story.hideReactions,
       allowedReactions: story.allowedReactions,
@@ -1837,7 +2086,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/stories/:id/react', authenticateToken, (req: AuthenticatedRequest, res) => {
+  app.post('/api/stories/:id/react', authenticateToken, reactionAntiCheat, (req: AuthenticatedRequest, res) => {
     const currentUserId = req.user!.id;
     const { emoji } = req.body;
     if (!emoji) {

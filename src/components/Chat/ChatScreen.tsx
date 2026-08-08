@@ -7,6 +7,7 @@ import {
   FileText,
   Check,
   CheckCheck,
+  Clock,
   Loader2,
   MoreVertical,
   Trash2,
@@ -40,6 +41,7 @@ import {
 } from 'lucide-react';
 import { Contact, Message, MessageReactionInfo, User } from '../../types';
 import { api } from '../../services/api';
+import { compressImage } from '../../services/media';
 import { socketService } from '../../services/socket';
 import { cacheService } from '../../services/cacheService';
 import { E2EESecurityModal } from './E2EESecurityModal';
@@ -55,7 +57,37 @@ import { VideoCircleRecorder } from './VideoCircleRecorder';
 import { StickerEmojiPicker } from './StickerEmojiPicker';
 import { VideoCirclePlayer } from './VideoCirclePlayer';
 import { StickyMediaHeaderPlayer } from './StickyMediaHeaderPlayer';
+import { ScheduleMessageModal } from './ScheduleMessageModal';
+import { ScheduledMessagesListModal } from './ScheduledMessagesListModal';
+import {
+  getScheduledMessages,
+  addScheduledMessage,
+  removeScheduledMessage,
+} from '../../utils/scheduledMessages';
+import { ScheduledMessage } from '../../types';
 import { triggerHaptic } from '../../utils/haptics';
+import { Skeleton, SkeletonAvatar } from '../Common/Skeleton';
+
+const MessageStatusIndicator: React.FC<{ message: Message; chatId?: string }> = ({ message, chatId }) => {
+  const isHideRead = typeof window !== 'undefined' && (
+    (chatId && localStorage.getItem(`orbit_hide_read_receipts_${chatId}`) === 'true') ||
+    localStorage.getItem('orbit_hide_read_receipts') === 'true'
+  );
+
+  if (message.pending) {
+    return <Clock size={11} className="text-slate-400 dark:text-slate-500 animate-pulse" title="Отправляется..." />;
+  }
+  if (message.isRead || message.status === 'read') {
+    if (isHideRead) {
+      return <Check size={12} className="text-slate-400 dark:text-slate-500" title="Отправлено (статус скрыт)" />;
+    }
+    return <CheckCheck size={12} className="text-sky-500 font-bold" title="Прочитано" />;
+  }
+  if (message.status === 'delivered') {
+    return <CheckCheck size={12} className="text-slate-400 dark:text-slate-500" title="Доставлено" />;
+  }
+  return <Check size={12} className="text-slate-400 dark:text-slate-500" title="Отправлено" />;
+};
 
 interface ChatScreenProps {
   contact: Contact;
@@ -68,6 +100,8 @@ interface ChatScreenProps {
   onOpenAuth?: () => void;
   onOpenUserProfile?: (userId: string) => void;
   onRefreshContacts?: () => void;
+  onUpdateContact?: (contact: Contact) => void;
+  onInitiateCall?: (contact: Contact, type: CallType) => void;
 }
 
 export const ChatScreen: React.FC<ChatScreenProps> = ({
@@ -81,9 +115,156 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
   onOpenAuth,
   onOpenUserProfile,
   onRefreshContacts,
+  onUpdateContact,
+  onInitiateCall,
 }) => {
   const [messages, setMessages] = useState<Message[]>([]);
-  const [input, setInput] = useState('');
+  const [input, setInput] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem(`orbit_draft_${contact.id}`) || '';
+    }
+    return '';
+  });
+  const loadedDraftContactIdRef = useRef<string>(contact.id);
+
+  // Auto-restore draft when contact changes
+  useEffect(() => {
+    loadedDraftContactIdRef.current = contact.id;
+    if (typeof window !== 'undefined') {
+      const savedDraft = localStorage.getItem(`orbit_draft_${contact.id}`);
+      setInput(savedDraft || '');
+    }
+  }, [contact.id]);
+
+  // Auto-save draft when input changes
+  useEffect(() => {
+    if (typeof window !== 'undefined' && loadedDraftContactIdRef.current === contact.id) {
+      if (input) {
+        localStorage.setItem(`orbit_draft_${contact.id}`, input);
+      } else {
+        localStorage.removeItem(`orbit_draft_${contact.id}`);
+      }
+    }
+  }, [input, contact.id]);
+
+  // Scheduled Messages State
+  const [scheduledList, setScheduledList] = useState<ScheduledMessage[]>(() => getScheduledMessages());
+  const [showScheduleModal, setShowScheduleModal] = useState(false);
+  const [showScheduledListModal, setShowScheduledListModal] = useState(false);
+
+  // Sync scheduled messages & dispatch due messages
+  useEffect(() => {
+    const checkScheduled = async () => {
+      const all = getScheduledMessages();
+      const now = Date.now();
+      const due = all.filter((m) => m.scheduledAt <= now);
+
+      if (due.length > 0) {
+        for (const msg of due) {
+          removeScheduledMessage(msg.id);
+          try {
+            const actualMsg = await api.sendMessage(msg.contactId, {
+              text: msg.text,
+              mediaUrl: msg.pendingMedia?.url,
+              mediaType: msg.pendingMedia?.mediaType,
+              duration: msg.pendingMedia?.duration,
+              waveform: msg.pendingMedia?.waveform,
+              replyTo: msg.replyTo,
+            });
+
+            if (msg.contactId === contact.id) {
+              setMessages((prev) => [...prev, actualMsg]);
+              requestAnimationFrame(() => {
+                messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+              });
+            }
+            showToast('⏱ Отложенное сообщение отправлено!');
+          } catch (err) {
+            console.error('Failed to send scheduled message:', err);
+            showToast('Ошибка отправки отложенного сообщения');
+          }
+        }
+        setScheduledList(getScheduledMessages());
+      }
+    };
+
+    checkScheduled();
+    const interval = setInterval(checkScheduled, 3000);
+    return () => clearInterval(interval);
+  }, [contact.id, user]);
+
+  const contactScheduledMessages = scheduledList.filter((m) => m.contactId === contact.id);
+
+  const handleScheduleMessageConfirm = (scheduledAtMs: number) => {
+    const textToSend = input.trim();
+    if (!textToSend && !pendingMedia) return;
+
+    addScheduledMessage({
+      contactId: contact.id,
+      text: textToSend,
+      scheduledAt: scheduledAtMs,
+      pendingMedia: pendingMedia ? {
+        url: pendingMedia.url,
+        mediaType: pendingMedia.mediaType,
+        fileName: pendingMedia.fileName,
+        fileSize: pendingMedia.fileSize,
+      } : null,
+      replyTo: replyingToMessage ? {
+        id: replyingToMessage.id,
+        text: replyingToMessage.text || 'Медиафайл',
+        senderName: replyingToMessage.from === 'me' ? (user?.username || 'Вы') : contact.name,
+      } : undefined,
+    });
+
+    setInput('');
+    setPendingMedia(null);
+    setReplyingToMessage(null);
+    if (typeof window !== 'undefined') {
+      localStorage.removeItem(`orbit_draft_${contact.id}`);
+    }
+    setScheduledList(getScheduledMessages());
+
+    const dateFormatted = new Date(scheduledAtMs).toLocaleString('ru-RU', {
+      day: '2-digit',
+      month: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+    showToast(`⏱ Сообщение запланировано на ${dateFormatted}`);
+  };
+
+  const handleSendScheduledNow = async (msg: ScheduledMessage) => {
+    removeScheduledMessage(msg.id);
+    setScheduledList(getScheduledMessages());
+    try {
+      const actualMsg = await api.sendMessage(msg.contactId, {
+        text: msg.text,
+        mediaUrl: msg.pendingMedia?.url,
+        mediaType: msg.pendingMedia?.mediaType,
+        duration: msg.pendingMedia?.duration,
+        waveform: msg.pendingMedia?.waveform,
+        replyTo: msg.replyTo,
+      });
+
+      if (msg.contactId === contact.id) {
+        setMessages((prev) => [...prev, actualMsg]);
+        requestAnimationFrame(() => {
+          messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+        });
+      }
+      showToast('Сообщение отправлено!');
+    } catch (err) {
+      console.error('Failed to send scheduled message:', err);
+      showToast('Ошибка при отправке сообщения');
+    }
+  };
+
+  const handleDeleteScheduled = (id: string) => {
+    removeScheduledMessage(id);
+    setScheduledList(getScheduledMessages());
+    showToast('Запланированное сообщение удалено');
+  };
+
   const [loading, setLoading] = useState(true);
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -114,25 +295,86 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
   const [fullScreenImage, setFullScreenImage] = useState<{ url: string; title?: string } | null>(null);
 
   // Chat Wallpaper Background Customization State
-  const [wallpaperSettings, setWallpaperSettings] = useState<WallpaperSettings>(() => {
-    try {
-      const saved = localStorage.getItem('chat_wallpaper_settings');
-      if (saved) return JSON.parse(saved);
-    } catch (e) {
-      console.error('Failed to load wallpaper settings:', e);
-    }
-    return DEFAULT_WALLPAPER_SETTINGS;
-  });
+  const [wallpaperSettings, setWallpaperSettings] = useState<WallpaperSettings>(DEFAULT_WALLPAPER_SETTINGS);
   const [showWallpaperModal, setShowWallpaperModal] = useState(false);
 
-  const handleSaveWallpaper = (newSettings: WallpaperSettings) => {
-    setWallpaperSettings(newSettings);
-    try {
-      localStorage.setItem('chat_wallpaper_settings', JSON.stringify(newSettings));
-    } catch (e) {
-      console.error('Failed to save wallpaper settings:', e);
+  // Sync wallpaper settings on contact change or channel group setting update
+  useEffect(() => {
+    if (contact.isChannelGroup) {
+      setWallpaperSettings({
+        preset: contact.bgPattern || 'default',
+        opacity: contact.bgOpacity ?? 35,
+        adaptTheme: contact.bgAdaptTheme ?? true,
+        imageUrl: contact.bgImageUrl || '',
+      });
+    } else {
+      try {
+        const chatKey = `orbit_chat_wallpaper_${contact.id}_${user?.id || 'me'}`;
+        const saved = localStorage.getItem(chatKey);
+        if (saved) {
+          setWallpaperSettings(JSON.parse(saved));
+          return;
+        }
+        const globalSaved = localStorage.getItem('chat_wallpaper_settings');
+        if (globalSaved) {
+          setWallpaperSettings(JSON.parse(globalSaved));
+          return;
+        }
+      } catch (e) {
+        console.error('Failed to load wallpaper settings:', e);
+      }
+      setWallpaperSettings(DEFAULT_WALLPAPER_SETTINGS);
     }
-    showToast('Фон чата сохранен!');
+  }, [
+    contact.id,
+    contact.isChannelGroup,
+    contact.bgPattern,
+    contact.bgOpacity,
+    contact.bgAdaptTheme,
+    contact.bgImageUrl,
+    user?.id,
+  ]);
+
+  const handleSaveWallpaper = async (newSettings: WallpaperSettings) => {
+    setWallpaperSettings(newSettings);
+
+    if (contact.isChannelGroup) {
+      if (!isUserAdminOrAuthor) {
+        showToast('Задний фон канала/группы может менять только автор');
+        return;
+      }
+      try {
+        const res = await api.updateChannelGroup(contact.id, {
+          bgPattern: newSettings.preset,
+          bgOpacity: newSettings.opacity,
+          bgAdaptTheme: newSettings.adaptTheme,
+          bgImageUrl: newSettings.imageUrl,
+        });
+        if (res.success) {
+          showToast('Фон канала/группы обновлен для всех участников!');
+          if (onUpdateContact) {
+            onUpdateContact({
+              ...contact,
+              bgPattern: newSettings.preset,
+              bgOpacity: newSettings.opacity,
+              bgAdaptTheme: newSettings.adaptTheme,
+              bgImageUrl: newSettings.imageUrl,
+            });
+          }
+        }
+      } catch (err: any) {
+        showToast(err.message || 'Ошибка сохранения фона на сервере');
+      }
+    } else {
+      try {
+        const chatKey = `orbit_chat_wallpaper_${contact.id}_${user?.id || 'me'}`;
+        localStorage.setItem(chatKey, JSON.stringify(newSettings));
+        localStorage.setItem('chat_wallpaper_settings', JSON.stringify(newSettings));
+      } catch (e) {
+        console.error('Failed to save wallpaper settings:', e);
+      }
+      showToast('Индивидуальный фон чата сохранен!');
+    }
   };
 
   // Selection & Reaction State
@@ -272,12 +514,16 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
           showToast('Только автор или администратор канала может запустить прямой эфир');
           return;
         }
-        socketService.emit('start_live_stream', {
-          channelId: contact.id,
-          channelTitle: contact.name,
-          authorName: user?.username || 'Администратор',
-        });
-        setCallType('channel_stream');
+        if (onInitiateCall) {
+          onInitiateCall(contact, 'channel_stream');
+        } else {
+          socketService.emit('start_live_stream', {
+            channelId: contact.id,
+            channelTitle: contact.name,
+            authorName: user?.username || 'Администратор',
+          });
+          setCallType('channel_stream');
+        }
       } else {
         showToast('В каналах обычные звонки недоступны');
       }
@@ -289,14 +535,17 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
       return;
     }
 
-    socketService.emit('call_user', {
-      targetUserId: contact.id,
-      callType: type,
-      caller: user,
-      channelId: contact.isChannelGroup ? contact.id : undefined,
-    });
-
-    setCallType(type);
+    if (onInitiateCall) {
+      onInitiateCall(contact, type);
+    } else {
+      socketService.emit('call_user', {
+        targetUserId: contact.id,
+        callType: type,
+        caller: user,
+        channelId: contact.isChannelGroup ? contact.id : undefined,
+      });
+      setCallType(type);
+    }
   };
 
   // Modals & Modes
@@ -306,6 +555,13 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
   const [isRecordingCircle, setIsRecordingCircle] = useState(false);
   const [inputMode, setInputMode] = useState<'mic' | 'video_circle'>('mic');
   const [showStickerEmojiPicker, setShowStickerEmojiPicker] = useState(false);
+
+  // Real-time Typing Indicator State
+  const [isOtherTyping, setIsOtherTyping] = useState(false);
+  const [typingUserName, setTypingUserName] = useState<string | null>(null);
+  const typingTimeoutRef = useRef<any>(null);
+  const localTypingTimerRef = useRef<any>(null);
+  const lastLocalTypingEmittedRef = useRef<number>(0);
 
   // Global Media Playback Engine State
   const [activeMedia, setActiveMedia] = useState<{
@@ -412,6 +668,36 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
   const [submittingReport, setSubmittingReport] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
+  // Per-chat read receipt setting
+  const [isHideReadReceipts, setIsHideReadReceipts] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    return localStorage.getItem(`orbit_hide_read_receipts_${contact.id}`) === 'true';
+  });
+
+  const handleToggleReadReceipts = () => {
+    const next = !isHideReadReceipts;
+    setIsHideReadReceipts(next);
+    localStorage.setItem(`orbit_hide_read_receipts_${contact.id}`, next ? 'true' : 'false');
+    triggerHaptic('light');
+    showToast(next ? 'Статус «прочитал» отключен для этого чата' : 'Статус «прочитал» включен для этого чата');
+  };
+
+  // Check if user was invited to this group/channel and track whether they saw the invite banner
+  const invitationInfo = (contact as any).invitations?.[user?.id || ''];
+  const inviteSeenKey = `orbit_invite_seen_${contact.id}_${user?.id || ''}`;
+  const [hasSeenInvite] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return true;
+    return localStorage.getItem(inviteSeenKey) === 'true';
+  });
+
+  useEffect(() => {
+    return () => {
+      if (invitationInfo && typeof window !== 'undefined') {
+        localStorage.setItem(inviteSeenKey, 'true');
+      }
+    };
+  }, [contact.id, invitationInfo, inviteSeenKey]);
+
   const showToast = (msg: string) => {
     setToastMessage(msg);
     setTimeout(() => setToastMessage(null), 4000);
@@ -438,6 +724,11 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
 
   useEffect(() => {
     fetchInitialMessages();
+    if (!contact.isChannelGroup && contact.id) {
+      api.addContact(contact.id).then(() => {
+        if (onRefreshContacts) onRefreshContacts();
+      }).catch(() => {});
+    }
 
     const unsubRead = socketService.subscribe('messages_read', (data) => {
       if (data.byUserId === contact.id) {
@@ -451,6 +742,8 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
         (data.message && String(data.message.senderId) === String(contact.id));
 
       if (isForCurrentChat && data.message) {
+        setIsOtherTyping(false);
+        if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
         setMessages((prev) => {
           if (prev.some((m) => m.id === data.message.id)) return prev;
           return [...prev, data.message];
@@ -458,7 +751,34 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
         requestAnimationFrame(() => {
           messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
         });
-        api.markMessagesRead(contact.id).catch(() => {});
+        if (typeof window !== 'undefined' && localStorage.getItem('orbit_hide_read_receipts') !== 'true') {
+          api.markMessagesRead(contact.id).catch(() => {});
+        }
+      }
+    });
+
+    const unsubTyping = socketService.subscribe('user_typing', (data) => {
+      const isSelf = user && String(data.senderId) === String(user.id);
+      if (isSelf) return;
+
+      const isForThisChat =
+        (contact.isChannelGroup && String(data.channelGroupId) === String(contact.id)) ||
+        (!contact.isChannelGroup && String(data.senderId) === String(contact.id));
+
+      if (isForThisChat) {
+        if (data.isTyping) {
+          setIsOtherTyping(true);
+          if (data.senderName) {
+            setTypingUserName(data.senderName);
+          }
+          if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+          typingTimeoutRef.current = setTimeout(() => {
+            setIsOtherTyping(false);
+          }, 3500);
+        } else {
+          setIsOtherTyping(false);
+          if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+        }
       }
     });
 
@@ -470,38 +790,65 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
       }
     });
 
+    const unsubSingleRead = socketService.subscribe('message_read_single', (data) => {
+      if (data.messageId) {
+        setMessages((prev) =>
+          prev.map((m) => (m.id === data.messageId ? { ...m, isRead: true, status: 'read' } : m))
+        );
+      }
+    });
+
     return () => {
       unsubRead();
       unsubMsg();
       unsubReaction();
+      unsubSingleRead();
+      unsubTyping();
+      if (typingTimeoutRef.current) clearTimeout(typingTimeoutRef.current);
+      if (localTypingTimerRef.current) clearTimeout(localTypingTimerRef.current);
     };
   }, [contact.id]);
 
   const handleToggleReaction = async (messageId: string, emoji: string) => {
     triggerHaptic('light');
-    // Optimistic UI update
+    // Optimistic UI update - strictly enforce single reaction per user
     setMessages((prev) =>
       prev.map((m) => {
         if (m.id !== messageId) return m;
-        const currentReactions = { ...(m.reactions || {}) };
-        const existing = currentReactions[emoji] || { count: 0, userReacted: false, users: [] };
+        const currentReactions: Record<string, MessageReactionInfo> = {};
 
-        let newCount = existing.count;
-        let newUserReacted = !existing.userReacted;
-
-        if (existing.userReacted) {
-          newCount = Math.max(0, newCount - 1);
-        } else {
-          newCount = newCount + 1;
+        if (m.reactions) {
+          Object.entries(m.reactions).forEach(([eKey, val]) => {
+            currentReactions[eKey] = { ...(val as MessageReactionInfo) };
+          });
         }
 
-        if (newCount === 0) {
-          delete currentReactions[emoji];
-        } else {
+        const targetReaction = currentReactions[emoji] || { count: 0, userReacted: false, users: [] };
+        const wasReactedByMe = targetReaction.userReacted;
+
+        // First remove user's reaction from ALL emojis
+        Object.keys(currentReactions).forEach((eKey) => {
+          if (currentReactions[eKey]?.userReacted) {
+            const updatedCount = Math.max(0, currentReactions[eKey].count - 1);
+            if (updatedCount === 0) {
+              delete currentReactions[eKey];
+            } else {
+              currentReactions[eKey] = {
+                ...currentReactions[eKey],
+                count: updatedCount,
+                userReacted: false,
+              };
+            }
+          }
+        });
+
+        // If user was not reacted to target emoji before, add reaction
+        if (!wasReactedByMe) {
+          const prevTarget = currentReactions[emoji] || { count: 0, userReacted: false, users: [] };
           currentReactions[emoji] = {
-            ...existing,
-            count: newCount,
-            userReacted: newUserReacted,
+            ...prevTarget,
+            count: prevTarget.count + 1,
+            userReacted: true,
           };
         }
 
@@ -622,6 +969,41 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
     }
   };
 
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const newValue = e.target.value;
+    setInput(newValue);
+
+    if (newValue.trim()) {
+      const now = Date.now();
+      if (now - lastLocalTypingEmittedRef.current > 1800) {
+        lastLocalTypingEmittedRef.current = now;
+        socketService.emit('typing', {
+          targetUserId: contact.isChannelGroup ? undefined : contact.id,
+          channelGroupId: contact.isChannelGroup ? contact.id : undefined,
+          isTyping: true,
+        });
+      }
+
+      if (localTypingTimerRef.current) clearTimeout(localTypingTimerRef.current);
+      localTypingTimerRef.current = setTimeout(() => {
+        socketService.emit('typing', {
+          targetUserId: contact.isChannelGroup ? undefined : contact.id,
+          channelGroupId: contact.isChannelGroup ? contact.id : undefined,
+          isTyping: false,
+        });
+        lastLocalTypingEmittedRef.current = 0;
+      }, 2500);
+    } else {
+      if (localTypingTimerRef.current) clearTimeout(localTypingTimerRef.current);
+      socketService.emit('typing', {
+        targetUserId: contact.isChannelGroup ? undefined : contact.id,
+        channelGroupId: contact.isChannelGroup ? contact.id : undefined,
+        isTyping: false,
+      });
+      lastLocalTypingEmittedRef.current = 0;
+    }
+  };
+
   const handleSendText = async (textOverride?: string, extraMediaProps?: Partial<Message>) => {
     if (commentsDisabled) {
       showToast('Комментарии отключены администратором');
@@ -633,17 +1015,31 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
       return;
     }
 
+    // Stop local typing indicator when sending
+    if (localTypingTimerRef.current) clearTimeout(localTypingTimerRef.current);
+    socketService.emit('typing', {
+      targetUserId: contact.isChannelGroup ? undefined : contact.id,
+      channelGroupId: contact.isChannelGroup ? contact.id : undefined,
+      isTyping: false,
+    });
+    lastLocalTypingEmittedRef.current = 0;
+
     const textToSend = (textOverride ?? input).trim();
     if (!textToSend && !extraMediaProps && !pendingMedia) return;
     triggerHaptic('success');
-    if (!textOverride) setInput('');
+    if (!textOverride) {
+      setInput('');
+      if (typeof window !== 'undefined') {
+        localStorage.removeItem(`orbit_draft_${contact.id}`);
+      }
+    }
 
     if (!isUserAdminOrAuthor && slowModeSec > 0) {
       lastSentTimeRef.current = Date.now();
       setSlowModeCooldown(slowModeSec);
     }
 
-    const mediaProps = extraMediaProps || (pendingMedia ? {
+    const mediaProps: Partial<Message> = extraMediaProps || (pendingMedia ? {
       mediaUrl: pendingMedia.url,
       mediaType: pendingMedia.mediaType,
       fileName: pendingMedia.fileName,
@@ -686,6 +1082,8 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
         text: textToSend,
         mediaUrl: mediaProps.mediaUrl,
         mediaType: mediaProps.mediaType,
+        duration: mediaProps.duration,
+        waveform: mediaProps.waveform,
         replyTo: replyProps.replyTo,
       });
       setMessages((prev) =>
@@ -697,14 +1095,14 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
     }
   };
 
-  const handleSendVoiceNote = async (durationSec: number, localMediaUrl?: string, blob?: Blob) => {
+  const handleSendVoiceNote = async (durationSec: number, localMediaUrl?: string, blob?: Blob, waveformLevels?: number[]) => {
     setIsRecordingVoice(false);
     setIsPushToTalk(false);
-    let serverUrl = localMediaUrl || 'https://actions.google.com/sounds/v1/ambiences/rain_heavy.ogg';
+    let serverUrl = '';
 
     if (blob && blob.size > 0) {
       try {
-        const ext = blob.type.includes('mp4') ? 'mp4' : 'webm';
+        const ext = blob.type.includes('mp4') ? 'mp4' : blob.type.includes('ogg') ? 'ogg' : 'webm';
         const file = new File([blob], `voice_${Date.now()}.${ext}`, { type: blob.type || 'audio/webm' });
         const uploadRes = await api.uploadMedia(file);
         if (uploadRes?.url) {
@@ -715,18 +1113,19 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
       }
     }
 
-    const playUrl = localMediaUrl || serverUrl;
+    const playUrl = serverUrl || localMediaUrl || 'https://actions.google.com/sounds/v1/ambiences/rain_heavy.ogg';
 
     await handleSendText(`Голосовое сообщение (${durationSec} сек)`, {
       mediaType: 'audio',
       duration: durationSec,
+      waveform: waveformLevels,
       mediaUrl: playUrl,
     });
   };
 
   const handleSendVideoCircle = async (durationSec: number, localMediaUrl?: string, blob?: Blob) => {
     setIsRecordingCircle(false);
-    let serverUrl = localMediaUrl || 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4';
+    let serverUrl = '';
 
     if (blob && blob.size > 0) {
       try {
@@ -741,7 +1140,7 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
       }
     }
 
-    const playUrl = localMediaUrl || serverUrl;
+    const playUrl = serverUrl || localMediaUrl || 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4';
 
     await handleSendText(`Видеосообщение (${durationSec} сек)`, {
       mediaType: 'video_circle',
@@ -751,21 +1150,25 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const rawFile = e.target.files?.[0];
+    if (!rawFile) return;
 
     setUploadingMedia(true);
     try {
-      const uploadRes = await api.uploadMedia(file);
-      const isDoc = !file.type.startsWith('image/') && !file.type.startsWith('video/');
+      const fileToUpload = rawFile.type.startsWith('image/')
+        ? await compressImage(rawFile, 1600, 1600, 0.85)
+        : rawFile;
+
+      const uploadRes = await api.uploadMedia(fileToUpload);
+      const isDoc = !rawFile.type.startsWith('image/') && !rawFile.type.startsWith('video/');
 
       setPendingMedia({
         url: uploadRes.url,
         mediaType: isDoc ? 'document' : ((uploadRes.mediaType as any) || 'image'),
-        fileName: file.name,
-        fileSize: `${(file.size / (1024 * 1024)).toFixed(1)} MB`,
+        fileName: fileToUpload.name,
+        fileSize: `${(fileToUpload.size / (1024 * 1024)).toFixed(1)} MB`,
       });
-      showToast('Медиафайл прикреплён. Вы можете добавить подпись и отправить.');
+      showToast('Медиафайл прикреплён (изображение оптимизировано).');
     } catch (err) {
       console.error('Media upload failed:', err);
       showToast('Ошибка загрузки медиафайла');
@@ -879,6 +1282,7 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
         preset={wallpaperSettings.preset}
         adaptTheme={wallpaperSettings.adaptTheme}
         opacity={wallpaperSettings.opacity}
+        imageUrl={wallpaperSettings.imageUrl}
       />
       {/* Hidden Global Audio & Video Players */}
       <audio
@@ -927,8 +1331,7 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
 
       {/* Toast Alert */}
       {toastMessage && (
-        <div className="absolute top-16 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-2xl bg-slate-900 text-white text-xs font-medium shadow-2xl flex items-center gap-2 border border-slate-700 animate-fade-in">
-          <Check size={14} className="text-emerald-400" />
+        <div className="absolute top-16 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-2xl bg-white/80 dark:bg-slate-900/80 backdrop-blur-md border border-slate-200/50 dark:border-slate-800/50 shadow-xl text-slate-600 dark:text-slate-300 text-xs font-medium tracking-tight animate-fade-in text-center whitespace-nowrap pointer-events-none">
           <span>{toastMessage}</span>
         </div>
       )}
@@ -1045,7 +1448,13 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
                 </button>
               </div>
               <div className="text-[10px] text-slate-400 flex items-center gap-1">
-                <span>{contact.isOnline ? 'В сети' : 'Не в сети'}</span>
+                {isOtherTyping ? (
+                  <span className="text-sky-500 dark:text-sky-400 font-semibold flex items-center gap-1 animate-pulse">
+                    печатает...
+                  </span>
+                ) : (
+                  <span>{contact.isOnline ? 'В сети' : 'Не в сети'}</span>
+                )}
                 <span>· Профиль</span>
               </div>
             </div>
@@ -1130,6 +1539,22 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
                   >
                     <Palette size={14} className="text-sky-500" />
                     <span>Оформить фон чата</span>
+                  </button>
+
+                  <button
+                    onClick={() => {
+                      setShowMenu(false);
+                      handleToggleReadReceipts();
+                    }}
+                    className="w-full flex items-center justify-between px-3 py-2 rounded-xl text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition font-medium"
+                  >
+                    <div className="flex items-center gap-2.5">
+                      <CheckCheck size={14} className={isHideReadReceipts ? 'text-slate-400' : 'text-sky-500'} />
+                      <span>Отчёт о прочтении</span>
+                    </div>
+                    <div className={`w-7 h-4 rounded-full transition-colors relative p-0.5 ${!isHideReadReceipts ? 'bg-sky-500' : 'bg-slate-300 dark:bg-slate-700'}`}>
+                      <div className={`w-3 h-3 rounded-full bg-white shadow-xs transition-transform ${!isHideReadReceipts ? 'translate-x-3' : 'translate-x-0'}`} />
+                    </div>
                   </button>
 
                   {isChannel ? (
@@ -1312,6 +1737,22 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
         )}
       </div>
 
+      {/* Scheduled Messages Banner Bar */}
+      {contactScheduledMessages.length > 0 && (
+        <div className="px-4 py-1.5 bg-sky-500/10 dark:bg-sky-500/20 border-b border-sky-500/20 flex items-center justify-between text-xs text-sky-600 dark:text-sky-400 font-medium shrink-0 z-20">
+          <span className="flex items-center gap-1.5">
+            <Clock size={13} className="animate-pulse text-sky-500" />
+            Отложенных сообщений в очереди: {contactScheduledMessages.length}
+          </span>
+          <button
+            onClick={() => setShowScheduledListModal(true)}
+            className="underline hover:text-sky-700 dark:hover:text-sky-300 font-bold transition"
+          >
+            Посмотреть / Отправить сейчас
+          </button>
+        </div>
+      )}
+
       {/* Messages Scroll Area */}
       <div
         ref={chatListRef}
@@ -1332,8 +1773,28 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
         )}
 
         {loading ? (
-          <div className="flex items-center justify-center py-12 text-slate-400 text-xs">
-            <Loader2 size={16} className="animate-spin mr-2 text-slate-500" /> Загрузка зашифрованного чата...
+          <div className="space-y-4 py-6 px-2 animate-fade-in">
+            <div className="flex justify-start">
+              <div className="flex items-end gap-2 max-w-[70%]">
+                <SkeletonAvatar size="sm" />
+                <Skeleton className="h-12 w-48 rounded-2xl rounded-bl-xs" />
+              </div>
+            </div>
+
+            <div className="flex justify-end">
+              <Skeleton className="h-16 w-56 rounded-2xl rounded-br-xs" />
+            </div>
+
+            <div className="flex justify-start">
+              <div className="flex items-end gap-2 max-w-[70%]">
+                <SkeletonAvatar size="sm" />
+                <Skeleton className="h-20 w-64 rounded-2xl rounded-bl-xs" />
+              </div>
+            </div>
+
+            <div className="flex justify-end">
+              <Skeleton className="h-10 w-36 rounded-2xl rounded-br-xs" />
+            </div>
           </div>
         ) : messages.length === 0 ? (
           <div className="text-center text-xs text-slate-400 py-12 space-y-2">
@@ -1355,9 +1816,66 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
 
             // CHANNEL NEWS FEED POST RENDERING (For channels: full-width news item cards)
             if (isChannel) {
+              const activeReactions = Object.entries(m.reactions || {}).filter(
+                ([_, val]) => (val as MessageReactionInfo)?.count > 0
+              ) as [string, MessageReactionInfo][];
+
               return (
-                <div id={`msg-${m.id}`} key={m.id} className="w-full my-3.5 animate-fade-in">
-                  <div className="w-full bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border border-slate-200/80 dark:border-slate-800 rounded-3xl p-4 shadow-sm hover:shadow-md transition space-y-3">
+                <div id={`msg-${m.id}`} key={m.id} className="w-full my-3.5 animate-fade-in relative">
+                  {/* Floating Reaction Bubble for Channel Posts */}
+                  {!reactionsDisabled && activeReactionPickerId === m.id && (
+                    <div
+                      className="absolute z-30 -top-11 left-4 flex items-center gap-0.5 p-1 rounded-full bg-white/95 dark:bg-slate-900/95 backdrop-blur-2xl border border-slate-200/80 dark:border-slate-700/80 shadow-xl animate-scale-in"
+                    >
+                      {availableReactions.map((emoji) => {
+                        const isReacted = m.reactions?.[emoji]?.userReacted;
+                        return (
+                          <button
+                            key={emoji}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleToggleReaction(m.id, emoji);
+                              setActiveReactionPickerId(null);
+                            }}
+                            className={`h-7 w-7 rounded-full flex items-center justify-center text-sm hover:scale-125 transition-transform active:scale-90 select-none ${
+                              isReacted ? 'bg-sky-500/20 ring-1 ring-sky-400' : 'hover:bg-slate-100 dark:hover:bg-slate-800'
+                            }`}
+                            title={`Реакция ${emoji}`}
+                          >
+                            {emoji}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+
+                  <div
+                    onClick={(e) => handleMessageClick(m, e)}
+                    onTouchStart={() => {
+                      if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+                      longPressTimerRef.current = setTimeout(() => {
+                        triggerHaptic('impactMedium');
+                        setActiveReactionPickerId(m.id);
+                      }, 400);
+                    }}
+                    onTouchEnd={handleTouchEndOrCancelMessage}
+                    onTouchMove={handleTouchEndOrCancelMessage}
+                    onMouseDown={() => {
+                      if (longPressTimerRef.current) clearTimeout(longPressTimerRef.current);
+                      longPressTimerRef.current = setTimeout(() => {
+                        triggerHaptic('impactMedium');
+                        setActiveReactionPickerId(m.id);
+                      }, 400);
+                    }}
+                    onMouseUp={handleTouchEndOrCancelMessage}
+                    onMouseLeave={handleTouchEndOrCancelMessage}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      triggerHaptic('impactMedium');
+                      setActiveReactionPickerId(m.id);
+                    }}
+                    className="w-full bg-white/95 dark:bg-slate-900/95 backdrop-blur-xl border border-slate-200/80 dark:border-slate-800 rounded-3xl p-4 shadow-sm hover:shadow-md transition space-y-3 cursor-pointer"
+                  >
                     {/* Channel Author Header */}
                     <div className="flex items-center justify-between pb-2 border-b border-slate-100 dark:border-slate-800/80">
                       <div className="flex items-center gap-2.5">
@@ -1458,37 +1976,34 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
                     )}
 
                     {/* Channel Post Footer Actions */}
-                    <div className="flex items-center justify-between pt-2 border-t border-slate-100 dark:border-slate-800/80 text-xs">
-                      {/* Reactions */}
-                      {!reactionsDisabled ? (
-                        <div className="flex items-center gap-1.5">
-                          {availableReactions.slice(0, 5).map((emoji) => {
-                            const count = m.reactions?.[emoji]?.count || 0;
-                            const userReacted = m.reactions?.[emoji]?.userReacted;
+                    {(!reactionsDisabled && activeReactions.length > 0) && (
+                      <div className="flex items-center justify-between pt-2 border-t border-slate-100 dark:border-slate-800/80 text-xs">
+                        {/* Reactions */}
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          {activeReactions.map(([emoji, val]) => {
+                            const count = val.count || 0;
+                            const userReacted = val.userReacted;
                             return (
                               <button
                                 key={emoji}
-                                onClick={() => handleToggleReaction(m.id, emoji)}
-                                onTouchStart={(e) => handleReactionBadgeTouchStart(m.id, e)}
-                                onTouchEnd={handleReactionBadgeTouchEnd}
-                                onContextMenu={(e) => {
-                                  e.preventDefault();
-                                  setActiveReactionPickerId(m.id);
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleToggleReaction(m.id, emoji);
                                 }}
-                                className={`px-2 py-1 rounded-full text-xs flex items-center gap-1 transition active:scale-95 ${
+                                className={`px-2.5 py-1 rounded-full text-xs flex items-center gap-1 transition active:scale-95 ${
                                   userReacted
                                     ? 'bg-sky-500/20 text-sky-500 border border-sky-500/30 font-bold'
                                     : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 hover:bg-slate-200 dark:hover:bg-slate-700'
                                 }`}
                               >
                                 <span>{emoji}</span>
-                                {count > 0 && <span className="text-[10px]">{count}</span>}
+                                <span className="text-[10px]">{count}</span>
                               </button>
                             );
                           })}
                         </div>
-                      ) : <div />}
-                    </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               );
@@ -1606,42 +2121,78 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
                             )}
                           </button>
 
-                          <div className="flex-1 min-w-[110px]">
-                            <div className="flex items-center gap-0.5 h-3.5 overflow-hidden">
-                              {Array.from({ length: 18 }).map((_, idx) => {
-                                const isPlayed =
-                                  activeMedia?.id === m.id &&
-                                  (idx / 18) * (m.duration || mediaDuration || 10) <= currentTime;
-                                return (
-                                  <span
-                                    key={idx}
-                                    className={`w-0.5 rounded-full transition-all ${
-                                      isPlayed
-                                        ? 'bg-sky-500'
-                                        : 'bg-slate-300 dark:bg-slate-600'
-                                    }`}
-                                    style={{
-                                      height: `${Math.floor(Math.sin(idx * 0.8) * 35 + 50)}%`,
-                                    }}
-                                  />
-                                );
-                              })}
+                          <div className="flex-1 min-w-[120px]">
+                            <div
+                              className="flex items-center gap-0.5 h-4 overflow-hidden cursor-pointer group/wave py-0.5"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const rect = e.currentTarget.getBoundingClientRect();
+                                const clickX = e.clientX - rect.left;
+                                const ratio = Math.max(0, Math.min(1, clickX / rect.width));
+                                const dur = m.duration || mediaDuration || 10;
+                                if (activeMedia?.id !== m.id) {
+                                  toggleMediaPlayback(
+                                    m.id,
+                                    'audio',
+                                    m.mediaUrl || '',
+                                    `Голосовое (${m.duration || 0}с)`,
+                                    m.duration || 10
+                                  );
+                                }
+                                setTimeout(() => {
+                                  handleSeek(ratio * dur);
+                                }, 50);
+                              }}
+                            >
+                              {(() => {
+                                const barCount = 22;
+                                const rawWave = m.waveform && m.waveform.length > 0
+                                  ? m.waveform
+                                  : Array.from({ length: barCount }).map((_, idx) =>
+                                      Math.floor(Math.sin((idx + (m.id.charCodeAt(0) || 5)) * 0.7) * 35 + 55)
+                                    );
+                                const dur = m.duration || mediaDuration || 10;
+
+                                return rawWave.slice(0, barCount).map((val, idx) => {
+                                  const progress = activeMedia?.id === m.id ? currentTime / dur : 0;
+                                  const barRatio = idx / barCount;
+                                  const isPlayed = barRatio <= progress;
+
+                                  return (
+                                    <span
+                                      key={idx}
+                                      className={`w-0.5 rounded-full transition-all group-hover/wave:scale-y-110 ${
+                                        isPlayed
+                                          ? 'bg-sky-500'
+                                          : 'bg-slate-300 dark:bg-slate-600'
+                                      }`}
+                                      style={{
+                                        height: `${Math.max(20, Math.min(100, val))}%`,
+                                      }}
+                                    />
+                                  );
+                                });
+                              })()}
                             </div>
                             <div className="flex items-center justify-between mt-1 text-[10px] text-slate-500 dark:text-slate-400">
                               <div className="flex items-center gap-1.5 font-mono text-[9px]">
                                 <span>Голосовое {m.duration ? `${m.duration}с` : ''}</span>
                                 {activeMedia?.id === m.id && (
-                                  <span className="text-sky-500 font-bold">{playbackRate}x</span>
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setPlaybackRate((r) => (r === 1 ? 1.5 : r === 1.5 ? 2 : 1));
+                                    }}
+                                    className="text-sky-500 font-bold bg-sky-500/10 hover:bg-sky-500/20 px-1 py-0.2 rounded transition active:scale-90"
+                                    title="Изменить скорость"
+                                  >
+                                    {playbackRate}x
+                                  </button>
                                 )}
                               </div>
                               <div className="flex items-center gap-1 text-[10px] text-slate-400 shrink-0 ml-2">
                                 <span>{formattedTime}</span>
-                                {isMe && (
-                                  <CheckCheck
-                                    size={12}
-                                    className={m.isRead ? 'text-sky-500 font-bold' : 'text-slate-400 dark:text-slate-500'}
-                                  />
-                                )}
+                                {isMe && <MessageStatusIndicator message={m} />}
                               </div>
                             </div>
                           </div>
@@ -1836,14 +2387,7 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
                           <span>{m.text}</span>
                           <span className="inline-flex items-center gap-0.5 text-[10px] text-slate-400 dark:text-slate-400 font-mono ml-2.5 align-baseline whitespace-nowrap select-none">
                             <span>{formattedTime}</span>
-                            {isMe && (
-                              <CheckCheck
-                                size={12}
-                                className={`${
-                                  m.isRead ? 'text-sky-500 font-bold' : 'text-slate-400 dark:text-slate-500'
-                                } inline self-center`}
-                              />
-                            )}
+                            {isMe && <MessageStatusIndicator message={m} chatId={contact.id} />}
                           </span>
                         </p>
 
@@ -1863,12 +2407,7 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
                     {(m.mediaType === 'image' || m.mediaType === 'document' || m.mediaType === 'sticker' || m.tx) && (
                       <div className="text-[10px] mt-0.5 flex items-center justify-end gap-1 text-slate-400 dark:text-slate-400">
                         <span>{formattedTime}</span>
-                        {isMe && (
-                          <CheckCheck
-                            size={12}
-                            className={m.isRead ? 'text-sky-500 font-bold' : 'text-slate-400 dark:text-slate-500'}
-                          />
-                        )}
+                        {isMe && <MessageStatusIndicator message={m} chatId={contact.id} />}
                       </div>
                     )}
 
@@ -1927,6 +2466,39 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
             );
           })
         )}
+
+        {/* Invitation banner on first entrance to channel/group */}
+        {isChannelGroup && invitationInfo && !hasSeenInvite && (
+          <div className="mx-auto my-3 px-4 py-2 rounded-2xl bg-white/80 dark:bg-slate-900/80 backdrop-blur-md border border-slate-200/50 dark:border-slate-800/50 text-slate-500 dark:text-slate-400 text-xs font-medium text-center shadow-xs w-fit animate-fade-in select-none">
+            Вас пригласил пользователь {invitationInfo.inviterName}
+          </div>
+        )}
+
+        {/* Real-time Typing Bubble Indicator */}
+        {isOtherTyping && (
+          <div className="flex items-center gap-2 mb-3.5 animate-fade-in pl-1">
+            <div
+              className={`h-7 w-7 rounded-full bg-gradient-to-br ${contact.color} flex items-center justify-center text-[10px] font-bold text-white shrink-0 shadow-sm relative overflow-hidden`}
+            >
+              {contact.avatarUrl ? (
+                <img src={contact.avatarUrl} alt={contact.name} className="h-full w-full rounded-full object-cover" />
+              ) : (
+                contact.initials
+              )}
+            </div>
+            <div className="px-3.5 py-2 rounded-2xl rounded-tl-xs bg-white/85 dark:bg-slate-800/85 backdrop-blur-md border border-slate-200/60 dark:border-slate-700/60 shadow-sm flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+              <span className="text-[11px] font-medium text-slate-600 dark:text-slate-300">
+                {typingUserName || contact.name} печатает
+              </span>
+              <span className="flex items-center gap-1 py-0.5">
+                <span className="h-1.5 w-1.5 rounded-full bg-sky-500 animate-bounce" style={{ animationDelay: '0ms' }} />
+                <span className="h-1.5 w-1.5 rounded-full bg-sky-500 animate-bounce" style={{ animationDelay: '150ms' }} />
+                <span className="h-1.5 w-1.5 rounded-full bg-sky-500 animate-bounce" style={{ animationDelay: '300ms' }} />
+              </span>
+            </div>
+          </div>
+        )}
+
         <div ref={messagesEndRef} />
       </div>
 
@@ -1934,11 +2506,11 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
       {isRecordingVoice && (
         <div className="p-3 bg-white/90 dark:bg-slate-900/90 backdrop-blur-xl border-t border-white/60 dark:border-slate-800 shrink-0">
           <VoiceRecorder
-            onSendVoice={(durationSec, mediaUrl, blob) => {
+            onSendVoice={(durationSec, mediaUrl, blob, waveform) => {
               setIsRecordingVoice(false);
               setIsPushToTalk(false);
               setPushStartPos(null);
-              handleSendVoiceNote(durationSec, mediaUrl, blob);
+              handleSendVoiceNote(durationSec, mediaUrl, blob, waveform);
             }}
             onCancel={() => {
               setIsRecordingVoice(false);
@@ -2098,7 +2670,7 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
 
                 <input
                   value={input}
-                  onChange={(e) => setInput(e.target.value)}
+                  onChange={handleInputChange}
                   onKeyDown={(e) => e.key === 'Enter' && handleSendText()}
                   placeholder={
                     slowModeCooldown > 0
@@ -2115,14 +2687,25 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
                   </span>
                 )}
 
-                {input.trim() ? (
-                  <button
-                    onClick={() => handleSendText()}
-                    disabled={slowModeCooldown > 0}
-                    className="h-8 w-8 rounded-full bg-sky-500 hover:bg-sky-600 text-white flex items-center justify-center shadow-md shadow-sky-500/20 active:scale-95 transition shrink-0 disabled:opacity-50"
-                  >
-                    <Send size={15} />
-                  </button>
+                {(input.trim() || pendingMedia) ? (
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      onClick={() => setShowScheduleModal(true)}
+                      disabled={slowModeCooldown > 0}
+                      className="h-8 w-8 rounded-full bg-slate-100 dark:bg-slate-800 hover:bg-sky-500 hover:text-white text-slate-500 dark:text-slate-300 flex items-center justify-center transition active:scale-95 shrink-0 disabled:opacity-50"
+                      title="Запланировать отправку сообщения"
+                    >
+                      <Clock size={15} />
+                    </button>
+                    <button
+                      onClick={() => handleSendText()}
+                      disabled={slowModeCooldown > 0}
+                      className="h-8 w-8 rounded-full bg-sky-500 hover:bg-sky-600 text-white flex items-center justify-center shadow-md shadow-sky-500/20 active:scale-95 transition shrink-0 disabled:opacity-50"
+                      title="Отправить сообщение"
+                    >
+                      <Send size={15} />
+                    </button>
+                  </div>
                 ) : (
                   <button
                     onPointerDown={handleRecordPointerDown}
@@ -2176,6 +2759,7 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
           onClose={() => setCallType(null)}
           contact={contact}
           callType={callType}
+          currentUserId={user?.id}
         />
       )}
 
@@ -2407,6 +2991,40 @@ export const ChatScreen: React.FC<ChatScreenProps> = ({
         onClose={() => setShowWallpaperModal(false)}
         settings={wallpaperSettings}
         onSave={handleSaveWallpaper}
+        title={contact.isChannelGroup ? 'Фон канала / группы' : 'Индивидуальный фон диалога'}
+        subtitle={
+          contact.isChannelGroup
+            ? isUserAdminOrAuthor
+              ? 'Установленный фон будет виден всем участникам одинаково'
+              : 'Просмотр фона, заданного автором канала/группы'
+            : `Персональные настройки фона для общения с ${contact.name}`
+        }
+      />
+
+      {/* Schedule Message Picker Modal */}
+      <ScheduleMessageModal
+        isOpen={showScheduleModal}
+        onClose={() => setShowScheduleModal(false)}
+        onSchedule={handleScheduleMessageConfirm}
+        textPreview={input}
+        mediaPreview={
+          pendingMedia
+            ? {
+                fileName: pendingMedia.fileName,
+                mediaType: pendingMedia.mediaType,
+              }
+            : null
+        }
+      />
+
+      {/* Scheduled Messages Queue List Modal */}
+      <ScheduledMessagesListModal
+        isOpen={showScheduledListModal}
+        onClose={() => setShowScheduledListModal(false)}
+        scheduledMessages={contactScheduledMessages}
+        onSendNow={handleSendScheduledNow}
+        onDelete={handleDeleteScheduled}
+        contactName={contact.name}
       />
     </div>
   );
